@@ -1,0 +1,27 @@
+{
+  "mcpServers": {
+    "doubao-image-mcp": {
+      "command": "node",
+      "args": ["/absolute/path/to/your/project/doubao-image/dist/index.js"]
+    }
+  }
+}
+
+// Alternative configuration using npm:
+/*
+{
+  "mcpServers": {
+    "doubao-image-mcp": {
+      "command": "npm",
+      "args": ["start"],
+      "cwd": "/absolute/path/to/your/project/doubao-image"
+    }
+  }
+}
+*/
+
+// To use this configuration:
+// 1. Copy the relevant section
+// 2. Replace "/absolute/path/to/your/project/doubao-image" with the actual absolute path
+// 3. Merge into your existing Claude Code config file at ~/.claude/claude_desktop_config.json
+// 4. Restart Claude Code
