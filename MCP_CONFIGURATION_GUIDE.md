@@ -6,7 +6,7 @@
 
 **服务器名称**: `doubao-image-mcp`
 
-**可用工具**: `generate_image` - 使用豆包AI生成图像并保存到本地（只需提供prompt参数）
+**可用工具**: `generate_image` - 使用豆包AI生成图像并保存到本地（`prompt`必填，`size`可选）
 
 ## 配置步骤
 
@@ -111,6 +111,10 @@ DOUBAO_API_KEY="test-key" timeout 3 npm run dev
 
 ```
 请使用 generate_image 工具生成一张图片，描述为："一只可爱的猫在月球上跳舞"
+
+可选地，你也可以传入 `size` 参数控制尺寸，例如：
+
+请使用 generate_image 工具生成一张图片，描述为："一只可爱的猫在月球上跳舞"，尺寸为："3072x2048"
 ```
 
 ## 故障排除

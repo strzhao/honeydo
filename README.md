@@ -7,9 +7,13 @@ A Model Context Protocol (MCP) server that exposes custom tools for Claude.
 **generate_image** - Generate images using Doubao AI and save to local file
   - **Parameters**:
     - `prompt` (string, required): Text description of the image to generate
-  - **Returns**: Path to the locally saved image file
+    - `size` (string, optional): Output image size. Supported values: `2K`, `3K`, or `<width>x<height>` (for example `3072x2048`)
+  - **Returns**: Generation details (model, requested/returned size) and path to the locally saved image file
   - **Default settings**:
-    - Model: doubao-seedream-4-5-251128
+    - Model (preferred): doubao-seedream-5-0-260128
+    - Automatic fallbacks when the account has not activated the preferred model:
+      - doubao-seedream-5-0-lite-260128
+      - doubao-seedream-4-5-251128
     - Size: 2K
     - Sequential image generation: disabled
     - Response format: url
