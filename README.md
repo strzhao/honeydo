@@ -49,6 +49,18 @@ For development with auto-reload:
 npm run dev
 ```
 
+## Automated npm Publishing
+
+This project publishes to npm automatically when a Git tag like `v0.2.1` is pushed.
+
+1. In GitHub repository settings, add secret `NPM_TOKEN`
+2. Ensure `package.json` version matches the tag (`v<version>`)
+3. Push tag to trigger workflow:
+
+```bash
+git push origin v0.2.1
+```
+
 ## Connecting to Claude Code
 
 To use this MCP server with Claude Code, add it to your Claude Code configuration:
