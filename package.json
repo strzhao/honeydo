@@ -1,8 +1,11 @@
 {
   "name": "doubao-image-mcp",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Doubao AI image generation MCP server",
   "main": "dist/index.js",
+  "bin": {
+    "doubao-image-mcp": "dist/index.js"
+  },
   "type": "module",
   "files": [
     "dist",
