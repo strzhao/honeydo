@@ -74,19 +74,19 @@ To use this MCP server with Claude Code, add it to your Claude Code configuratio
 
 1. Edit your Claude Code config file (usually at `~/.claude/claude_desktop_config.json`)
 
-2. Add the server configuration:
+2. Add the server configuration (recommended: run from npm package via `npx`):
 ```json
 {
   "mcpServers": {
     "doubao-image-mcp": {
-      "command": "node",
-      "args": ["/absolute/path/to/this/project/dist/index.js"]
+      "command": "npx",
+      "args": ["-y", "doubao-image-mcp"]
     }
   }
 }
 ```
 
-Or if you want to run it from the project directory:
+Or if you want to run it from the local project directory:
 ```json
 {
   "mcpServers": {
