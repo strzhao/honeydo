@@ -53,7 +53,14 @@ npm run dev
 
 This project publishes to npm automatically when a Git tag like `v0.2.1` is pushed.
 
-1. In GitHub repository settings, add secret `NPM_TOKEN`
+This workflow uses npm Trusted Publishing (OIDC), so no `NPM_TOKEN` secret is required.
+
+1. In npm package settings, configure **Trusted Publisher**:
+   - Provider: `GitHub Actions`
+   - Owner: `strzhao`
+   - Repository: `doubao-image-mcp`
+   - Workflow file: `npm-publish.yml`
+   - Environment: leave empty
 2. Ensure `package.json` version matches the tag (`v<version>`)
 3. Push tag to trigger workflow:
 
