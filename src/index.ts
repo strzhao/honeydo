@@ -1,18 +1,19 @@
 #!/usr/bin/env node
+
 /**
  * MCP Server wrapping Google Gemini CLI.
  * Allows other AI models to call Gemini through the Model Context Protocol.
  */
 
+import { spawn } from "node:child_process";
+import { resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { spawn } from "node:child_process";
-import { resolve } from "node:path";
 
 // Constants
-const DEFAULT_TIMEOUT_MS = 120_000; // 2 minutes
-const CHARACTER_LIMIT = 50_000;
+export const DEFAULT_TIMEOUT_MS = 120_000; // 2 minutes
+export const CHARACTER_LIMIT = 50_000;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -24,10 +25,10 @@ interface GeminiResult {
   exitCode: number | null;
 }
 
-function runGemini(
+export function runGemini(
   args: string[],
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
-  cwd?: string
+  cwd?: string,
 ): Promise<GeminiResult> {
   return new Promise((resolve, reject) => {
     const child = spawn("gemini", args, {
@@ -66,7 +67,7 @@ function runGemini(
   });
 }
 
-function truncate(text: string): string {
+export function truncate(text: string): string {
   if (text.length <= CHARACTER_LIMIT) return text;
   return (
     text.slice(0, CHARACTER_LIMIT) +
@@ -97,27 +98,27 @@ const GeminiPromptSchema = z
       .string()
       .optional()
       .describe(
-        "Gemini model to use (e.g. 'gemini-2.5-pro'). Omit for the default model."
+        "Gemini model to use (e.g. 'gemini-2.5-pro'). Omit for the default model.",
       ),
     sandbox: z
       .boolean()
       .optional()
       .default(false)
       .describe(
-        "Run Gemini in sandbox mode (restricted environment, safer for untrusted prompts)"
+        "Run Gemini in sandbox mode (restricted environment, safer for untrusted prompts)",
       ),
     yolo: z
       .boolean()
       .optional()
       .default(false)
       .describe(
-        "Auto-approve all tool actions that Gemini wants to perform (use with caution)"
+        "Auto-approve all tool actions that Gemini wants to perform (use with caution)",
       ),
     cwd: z
       .string()
       .optional()
       .describe(
-        "Working directory for Gemini CLI. Gemini can read/write files relative to this directory."
+        "Working directory for Gemini CLI. Gemini can read/write files relative to this directory.",
       ),
     timeout_ms: z
       .number()
@@ -229,7 +230,7 @@ Examples:
         isError: true,
       };
     }
-  }
+  },
 );
 
 // ---------------------------------------------------------------------------
@@ -256,7 +257,8 @@ server.registerTool(
         content: [
           {
             type: "text" as const,
-            text: result.stdout.trim() || result.stderr.trim() || "Unknown version",
+            text:
+              result.stdout.trim() || result.stderr.trim() || "Unknown version",
           },
         ],
       };
@@ -271,7 +273,7 @@ server.registerTool(
         isError: true,
       };
     }
-  }
+  },
 );
 
 // ---------------------------------------------------------------------------
