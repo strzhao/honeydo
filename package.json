@@ -1,6 +1,6 @@
 {
   "name": "@stringzhao/gemini-mcp",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "MCP server that wraps Google Gemini CLI, enabling other models to call Gemini",
   "type": "module",
   "main": "dist/index.js",
