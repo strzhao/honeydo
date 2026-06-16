@@ -1,0 +1,39 @@
+{
+  "name": "@stringzhao/minimax",
+  "version": "1.0.0",
+  "description": "minimax — CLI for the MiniMax API (text-to-audio, voice clone, voice list)",
+  "main": "dist/cli.js",
+  "bin": {
+    "minimax": "dist/cli.js"
+  },
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "start": "node dist/cli.js",
+    "dev": "tsx src/cli.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.0"
+  },
+  "keywords": [
+    "minimax",
+    "tts",
+    "voice-clone",
+    "cli"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}
