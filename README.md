@@ -1,50 +1,66 @@
-# gemini-mcp-server
+# gcli
 
-MCP server that wraps the [Google Gemini CLI](https://github.com/google-gemini/gemini-cli), letting other AI models (Claude, GPT, etc.) call Gemini through the Model Context Protocol.
+Thin CLI wrapper around the [`agy`](https://github.com/google-gemini/gemini-cli) CLI (formerly `gemini`).
+
+Adds value over calling `agy` directly: prompt via argv **or** stdin, 50k-char output truncation, a hard timeout (spawn kill), explicit exit codes, and empty-output detection. Exists so calling skills have a stable entry point even if the underlying CLI is renamed again.
 
 ## Prerequisites
 
 - Node.js >= 18
-- Gemini CLI installed and authenticated: `npm install -g @google/gemini-cli`
+- The `agy` CLI installed and authenticated (formerly `gemini`)
 
-## Install & Build
+## Install
 
 ```bash
 npm install
 npm run build
+npm link        # makes `gcli` available globally
 ```
 
-## Usage with Claude Code
+Confirm: `which gcli && gcli --version`
 
-Add to your Claude Code MCP settings (`~/.claude/settings.json` or project `.claude/settings.json`):
+## Usage
 
-```json
-{
-  "mcpServers": {
-    "gemini": {
-      "command": "node",
-      "args": ["/absolute/path/to/gemini-mcp/dist/index.js"]
-    }
-  }
-}
+```bash
+# prompt as argument
+gcli -p "Explain async/await" --yolo --cwd .
+
+# long prompt via stdin
+echo "$(cat prompt.md)" | gcli -p -
+
+# pick a model
+gcli -p "..." --model gemini-2.5-pro
+
+# hard timeout (ms)
+gcli -p "..." --timeout 300000
 ```
 
-## Tools
+### Options
 
-### `gemini_prompt`
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-p, --prompt <text\|->` | *(required)* | Prompt text, or `-` to read from stdin |
+| `--model <name>` | agy default | agy model (e.g. `gemini-2.5-pro`) |
+| `--yolo` | off | Auto-approve tool actions (`--dangerously-skip-permissions`) |
+| `--sandbox` | off | Run agy in sandbox mode |
+| `--cwd <dir>` | process cwd | Working directory (added via agy `--add-dir`) |
+| `--timeout <ms>` | `300000` | Hard timeout in ms (max `600000`) |
+| `--version` | | Print the agy version |
+| `--help` | | Show help |
 
-Send a prompt to Gemini CLI in non-interactive mode.
+### Exit codes
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `prompt` | string | *(required)* | The prompt to send |
-| `model` | string | CLI default | Gemini model (e.g. `gemini-2.5-pro`) |
-| `sandbox` | boolean | `false` | Run in sandbox mode |
-| `yolo` | boolean | `false` | Auto-approve all tool actions |
-| `cwd` | string | server cwd | Working directory |
-| `timeout_ms` | number | `120000` | Timeout in ms |
-| `output_format` | string | `text` | `text`, `json`, or `stream-json` |
+- `0` — success
+- `1` — agy error / timeout / empty output (message on stderr)
+- `2` — bad arguments
 
-### `gemini_version`
+Output is truncated to 50,000 characters (a `[Truncated]` marker is appended).
 
-Returns the installed Gemini CLI version.
+## Develop
+
+```bash
+npm run dev        # tsx watch
+npm run build      # tsc
+npm test           # vitest run
+npm run lint       # biome check
+```
