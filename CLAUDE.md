@@ -1,49 +1,38 @@
-# CLAUDE.md
+# doubao
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+CLI wrapper around the Doubao (Volces Ark) image-generation API, exposed as the global `doubao` command. Formerly an MCP server (`doubao-image-mcp`); the MCP layer was removed in favor of a CLI.
 
 ## Commands
 
 ```bash
 npm install          # Install dependencies
 npm run build        # Compile TypeScript to dist/
-npm start            # Run compiled server (node dist/index.js)
-npm run dev          # Run with tsx (no build needed, for development)
+npm start            # Run compiled CLI (node dist/cli.js)
+npm run dev          # Run with tsx (no build needed)
+npm test             # vitest run (unit tests for pure helpers)
 ```
-
-There are no tests in this project.
-
-## Publishing to npm
-
-Publishing is automated via GitHub Actions when a version tag is pushed. The tag must match `package.json` version:
-
-```bash
-# Update version in package.json first, then:
-git tag v0.2.5
-git push origin v0.2.5
-```
-
-The workflow uses npm Trusted Publishing (OIDC) — no `NPM_TOKEN` secret needed, but the GitHub repo must be configured as a Trusted Publisher in the npm package settings.
 
 ## Architecture
 
-This is a single-file MCP (Model Context Protocol) server in `src/index.ts`. It communicates over stdio using `@modelcontextprotocol/sdk` and exposes one tool: `generate_image`.
+Single-file CLI in `src/cli.ts`. Zero runtime dependencies (Node built-ins only: `fetch`, `node:util` parseArgs, `node:fs`).
 
-**Request flow:**
-1. Claude calls `generate_image` with a `prompt` (required) and optional `size`
-2. Server tries `MODEL_CANDIDATES` in order, falling back on `ModelNotOpen` (HTTP 404) errors
-3. On success, downloads the image URL returned by the Doubao API and saves it to `generated_images/` relative to `dist/`
-4. Returns the local file path to Claude
+### Key components
+- `parseCliArgs()` — argv parsing (prompt as first positional, `--size`, `--output`)
+- `normalizeSize()` / `resolveSizeForModel()` / `isModelNotOpenError()` — pure helpers (unit-tested)
+- `generateImage()` — walks `MODEL_CANDIDATES`, calls the Ark API, downloads the image, writes the file
 
-**Model fallback chain** (tried in order):
-- `doubao-seedream-5-0-260128` (preferred)
-- `doubao-seedream-5-0-lite-260128`
-- `doubao-seedream-4-5-251128`
+### Direct-invocation guard
+`main()` runs only when invoked directly. Uses `realpathSync` (not `resolve`) so it holds under the npm-link symlink.
 
-**Size handling:** The `3K` preset is only valid for 5.0 models; for older fallback models it is remapped to `3072x3072`. Custom pixel sizes use the format `<width>x<height>`.
+### Request flow
+1. Prompt (required) + optional `--size`/`--output` parsed from argv
+2. Missing `DOUBAO_API_KEY` → exit 1 with a clear stderr message
+3. Try `MODEL_CANDIDATES` in order, falling back on `ModelNotOpen` (HTTP 404)
+4. Download the returned image URL, save to `--output` or `./generated_images/<ts>_<prompt>.png`
+5. On success, last stdout line is `Saved to: <absolute path>`
 
-**Adding tools:** Add a definition to the `tools` array and a `case` to the `CallToolRequestSchema` handler in `src/index.ts`.
+## Conventions
 
-## Environment
-
-Requires `DOUBAO_API_KEY` environment variable (Volcano Engine / ByteDance ARK platform API key). The API endpoint is `https://ark.cn-beijing.volces.com/api/v3/images/generations`.
+- ESM (`"type": "module"`), strict TypeScript
+- Pure helpers exported for unit testing; network/IO isolated in `generateImage`
+- Exit codes: `0` success, `1` API error / missing key, `2` bad args

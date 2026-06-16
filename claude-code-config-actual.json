@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "doubao-image-mcp": {
-      "command": "node",
-      "args": ["/Users/stringzhao/workspace_sync/personal_projects/doubao-image/dist/index.js"]
-    }
-  }
-}

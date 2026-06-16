@@ -1,10 +1,10 @@
 {
-  "name": "doubao-image-mcp",
-  "version": "0.2.5",
-  "description": "Doubao AI image generation MCP server",
-  "main": "dist/index.js",
+  "name": "@stringzhao/doubao",
+  "version": "1.0.0",
+  "description": "doubao — CLI for generating images via the Doubao (Volces Ark) API",
+  "main": "dist/cli.js",
   "bin": {
-    "doubao-image-mcp": "dist/index.js"
+    "doubao": "dist/cli.js"
   },
   "type": "module",
   "files": [
@@ -13,22 +13,25 @@
   ],
   "scripts": {
     "build": "tsc",
-    "prepublishOnly": "npm run build",
-    "start": "node dist/index.js",
-    "dev": "tsx src/index.ts"
+    "clean": "rm -rf dist",
+    "start": "node dist/cli.js",
+    "dev": "tsx src/cli.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^0.6.0"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@types/node": "^20.0.0",
     "tsx": "^4.0.0",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "vitest": "^4.1.0"
   },
   "keywords": [
-    "mcp",
-    "claude",
-    "ai"
+    "doubao",
+    "image-generation",
+    "cli",
+    "volces",
+    "ark"
   ],
   "author": "strzhao",
   "license": "MIT",

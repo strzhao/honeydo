@@ -1,117 +1,71 @@
-# Custom MCP Server
+# doubao
 
-A Model Context Protocol (MCP) server that exposes custom tools for Claude.
+CLI for generating images via the [Doubao / Volces Ark](https://www.volcengine.com/product/doubao) image-generation API.
 
-## Tools Available
+Generates an image from a text prompt, walks a model fallback chain when the preferred model isn't activated for the account, downloads the result, and saves it to a file. The last line of stdout is always `Saved to: <absolute path>` so scripts can grep it.
 
-**generate_image** - Generate images using Doubao AI and save to local file
-  - **Parameters**:
-    - `prompt` (string, required): Text description of the image to generate
-    - `size` (string, optional): Output image size. Supported values: `2K`, `3K`, or `<width>x<height>` (for example `3072x2048`)
-  - **Returns**: Generation details (model, requested/returned size) and path to the locally saved image file
-  - **Default settings**:
-    - Model (preferred): doubao-seedream-5-0-260128
-    - Automatic fallbacks when the account has not activated the preferred model:
-      - doubao-seedream-5-0-lite-260128
-      - doubao-seedream-4-5-251128
-    - Size: 2K
-    - Sequential image generation: disabled
-    - Response format: url
-    - Watermark: false
-    - Stream: false
-  - **Requirements**: Set `DOUBAO_API_KEY` environment variable with your API key
+> Formerly an MCP server (`doubao-image-mcp`). The MCP layer was removed because its tool schema consumed context on every call; a CLI is invoked only when needed.
 
-## Setup and Installation
+## Prerequisites
 
-1. Install dependencies:
-   ```bash
-   npm install
-   ```
+- Node.js >= 18
+- A Doubao (Volces Ark) API key in the `DOUBAO_API_KEY` environment variable
 
-2. Build the server:
-   ```bash
-   npm run build
-   ```
-
-3. Set up environment variable for Doubao API:
-   ```bash
-   export DOUBAO_API_KEY="your-api-key-here"
-   ```
-   Or add it to your shell profile (`.bashrc`, `.zshrc`, etc.).
-
-4. Run the server:
-   ```bash
-   npm start
-   ```
-
-For development with auto-reload:
-```bash
-npm run dev
-```
-
-## Automated npm Publishing
-
-This project publishes to npm automatically when a Git tag like `v0.2.1` is pushed.
-
-This workflow uses npm Trusted Publishing (OIDC), so no `NPM_TOKEN` secret is required.
-
-1. In npm package settings, configure **Trusted Publisher**:
-   - Provider: `GitHub Actions`
-   - Owner: `strzhao`
-   - Repository: `doubao-image-mcp`
-   - Workflow file: `npm-publish.yml`
-   - Environment: leave empty
-2. Ensure `package.json` version matches the tag (`v<version>`)
-3. Push tag to trigger workflow:
+## Install
 
 ```bash
-git push origin v0.2.1
+npm install
+npm run build
+npm link        # makes `doubao` available globally
 ```
 
-## Connecting to Claude Code
+Confirm: `which doubao`
 
-To use this MCP server with Claude Code, add it to your Claude Code configuration:
+## Usage
 
-1. Edit your Claude Code config file (usually at `~/.claude/claude_desktop_config.json`)
+```bash
+# default size (2K), output to ./generated_images/<ts>_<prompt>.png
+doubao "a red apple on a white background, no text"
 
-2. Add the server configuration (recommended: run from npm package via `npx`):
-```json
-{
-  "mcpServers": {
-    "doubao-image-mcp": {
-      "command": "npx",
-      "args": ["-y", "doubao-image-mcp"]
-    }
-  }
-}
+# pick a size and an explicit output path
+doubao "children book illustration, an apple" --size 3K --output /tmp/apple.png
 ```
 
-Or if you want to run it from the local project directory:
-```json
-{
-  "mcpServers": {
-    "doubao-image-mcp": {
-      "command": "npm",
-      "args": ["start"],
-      "cwd": "/absolute/path/to/this/project"
-    }
-  }
-}
+### Options
+
+| Arg | Default | Description |
+|-----|---------|-------------|
+| `"<prompt>"` | *(required)* | Text description of the image |
+| `--size <s>` | `2K` | `2K`, `3K`, or `<width>x<height>` (e.g. `3072x2048`) |
+| `--output <path>` | `./generated_images/<ts>_<prompt>.png` | Output file path |
+| `--help` | | Show help |
+
+### Exit codes
+
+- `0` — success (image saved)
+- `1` — API error or `DOUBAO_API_KEY` not set (reason on stderr)
+- `2` — bad arguments
+
+### Model fallback
+
+Tried in order until one succeeds (skips on `ModelNotOpen` 404):
+1. `doubao-seedream-5-0-260128` (preferred)
+2. `doubao-seedream-5-0-lite-260128`
+3. `doubao-seedream-4-5-251128`
+
+The `3K` preset is only valid for 5.0 models; for older fallbacks it is remapped to `3072x3072`.
+
+## Develop
+
+```bash
+npm run dev        # tsx src/cli.ts
+npm run build      # tsc → dist/
+npm test           # vitest run
 ```
 
-## Adding More Tools
+## Environment
 
-To add more tools:
-
-1. Add the tool definition to the `tools` array in `src/index.ts`
-2. Add a new case in the `switch` statement in the `CallToolRequestSchema` handler
-3. Rebuild and restart the server
-
-## Development
-
-- Write TypeScript code in the `src/` directory
-- The project uses `tsx` for development with hot reload
-- Build output goes to `dist/` directory
+`DOUBAO_API_KEY` — Volces Ark platform API key. Endpoint: `https://ark.cn-beijing.volces.com/api/v3/images/generations`.
 
 ## License
 
