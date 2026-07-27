@@ -1,8 +1,8 @@
 ---
 active: true
-phase: "merge"
+phase: "done"
 gate: ""
-iteration: 3
+iteration: 4
 max_iterations: 30
 max_retries: 3
 retry_count: 1
@@ -12,7 +12,7 @@ fast_mode: "standard"
 brief_file: ""
 next_task: ""
 auto_approve: false
-knowledge_extracted: ""
+knowledge_extracted: "true"
 task_dir: "/Users/stringzhao/workspace_sync/personal_projects/gcli/.autopilot/runtime/requirements/20260725-我希望扩展当前的-cli"
 session_id: e29a42e7-72d4-4989-93fc-22c1205903fe
 started_at: "2026-07-25T13:19:18Z"
