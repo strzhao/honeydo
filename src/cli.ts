@@ -550,12 +550,14 @@ export function parseApiArgs(argv: string[]): ParseApiResult {
   // option") so callers know the api backend refuses them on purpose.
   if (argv.includes("--yolo")) {
     return {
-      error: "api backend does not support --yolo (agent flag; api has no agent)",
+      error:
+        "api backend does not support --yolo (agent flag; api has no agent)",
     };
   }
   if (argv.includes("--sandbox")) {
     return {
-      error: "api backend does not support --sandbox (agent flag; api has no agent)",
+      error:
+        "api backend does not support --sandbox (agent flag; api has no agent)",
     };
   }
   try {
