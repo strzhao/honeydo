@@ -1,9 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  API_DEFAULT_MAX_TOKENS,
   buildAgyArgs,
+  buildApiBody,
+  buildApiEndpoint,
   buildClaudeArgs,
   CHARACTER_LIMIT,
+  extractNonStreamText,
+  extractTextDelta,
   type ParseResult,
+  parseApiArgs,
   parseCliArgs,
   parseSubcommand,
   truncate,
@@ -261,5 +267,206 @@ describe("buildClaudeArgs", () => {
   it("never emits timeout (spawn kill owns it)", () => {
     const args = buildClaudeArgs({ prompt: "hi" });
     expect(args.some((a) => a.includes("timeout"))).toBe(false);
+  });
+});
+
+describe("parseSubcommand (api)", () => {
+  it("routes 'api' as the api subcommand and strips it from rest", () => {
+    const r = parseSubcommand(["api", "-p", "hi"]);
+    expect("error" in r).toBe(false);
+    if (!("error" in r)) {
+      expect(r.subcommand).toBe("api");
+      expect(r.rest).toEqual(["-p", "hi"]);
+    }
+  });
+
+  it("keeps 'api' as a literal prompt when it appears after -p (strict)", () => {
+    const r = parseSubcommand(["-p", "api"]);
+    expect("error" in r).toBe(false);
+    if (!("error" in r)) {
+      expect(r.subcommand).toBeUndefined();
+      expect(r.rest).toEqual(["-p", "api"]);
+    }
+  });
+});
+
+describe("parseApiArgs (strict, no passthrough)", () => {
+  it("parses a minimal prompt + provider with defaults", () => {
+    const r = parseApiArgs(["-p", "hi", "--provider", "kimi"]);
+    expect("error" in r).toBe(false);
+    if (!("error" in r)) {
+      expect(r.prompt).toBe("hi");
+      expect(r.provider).toBe("kimi");
+      expect(r.maxTokens).toBe(API_DEFAULT_MAX_TOKENS);
+      expect(r.stream).toBe(true);
+      expect(r.timeoutMs).toBe(300_000);
+    }
+  });
+
+  it("honours --max-tokens", () => {
+    const r = parseApiArgs([
+      "-p",
+      "hi",
+      "--provider",
+      "kimi",
+      "--max-tokens",
+      "4000",
+    ]);
+    expect("error" in r).toBe(false);
+    if (!("error" in r)) expect(r.maxTokens).toBe(4000);
+  });
+
+  it("rejects --max-tokens below 1", () => {
+    expect(
+      "error" in
+        parseApiArgs(["-p", "hi", "--provider", "kimi", "--max-tokens", "0"]),
+    ).toBe(true);
+  });
+
+  it("flips stream to false with --no-stream", () => {
+    const r = parseApiArgs(["-p", "hi", "--provider", "kimi", "--no-stream"]);
+    expect("error" in r).toBe(false);
+    if (!("error" in r)) expect(r.stream).toBe(false);
+  });
+
+  it("rejects an unknown flag (strict, NOT forwarded)", () => {
+    const r = parseApiArgs(["-p", "hi", "--provider", "kimi", "--bogus"]);
+    expect("error" in r).toBe(true);
+  });
+
+  it("rejects --yolo (strict, NOT forwarded)", () => {
+    const r = parseApiArgs(["-p", "hi", "--provider", "kimi", "--yolo"]);
+    expect("error" in r).toBe(true);
+  });
+
+  it("rejects a bare positional (strict)", () => {
+    const r = parseApiArgs(["-p", "hi", "--provider", "kimi", "foo"]);
+    expect("error" in r).toBe(true);
+  });
+
+  it("captures --model override", () => {
+    const r = parseApiArgs(["-p", "hi", "--provider", "kimi", "--model", "k3"]);
+    expect("error" in r).toBe(false);
+    if (!("error" in r)) expect(r.model).toBe("k3");
+  });
+
+  it("accepts --cwd (warned + ignored by backend, not a parse error)", () => {
+    const r = parseApiArgs(["-p", "hi", "--provider", "kimi", "--cwd", "/tmp"]);
+    expect("error" in r).toBe(false);
+    if (!("error" in r)) expect(r.cwd).toBe("/tmp");
+  });
+
+  it("rejects timeout out of range", () => {
+    expect(
+      "error" in
+        parseApiArgs(["-p", "hi", "--provider", "kimi", "--timeout", "10"]),
+    ).toBe(true);
+  });
+});
+
+describe("buildApiBody", () => {
+  it("builds the messages request WITHOUT disabling thinking (k3 quality source)", () => {
+    const body = buildApiBody({
+      model: "k3",
+      maxTokens: 8000,
+      prompt: "hello",
+      stream: true,
+    });
+    expect(body).toEqual({
+      model: "k3",
+      max_tokens: 8000,
+      stream: true,
+      messages: [{ role: "user", content: "hello" }],
+    });
+    // thinking must NOT be disabled — k3 thinking is the quality source we keep
+    expect(body).not.toHaveProperty("thinking");
+  });
+
+  it("reflects stream=false when non-stream requested", () => {
+    const body = buildApiBody({
+      model: "k3",
+      maxTokens: 16,
+      prompt: "hi",
+      stream: false,
+    });
+    expect(body.stream).toBe(false);
+  });
+});
+
+describe("buildApiEndpoint", () => {
+  it("appends v1/messages to a base with trailing slash", () => {
+    expect(buildApiEndpoint("https://api.kimi.com/coding/")).toBe(
+      "https://api.kimi.com/coding/v1/messages",
+    );
+  });
+
+  it("inserts a slash when the base lacks one", () => {
+    expect(buildApiEndpoint("https://api.kimi.com/coding")).toBe(
+      "https://api.kimi.com/coding/v1/messages",
+    );
+  });
+});
+
+describe("extractTextDelta", () => {
+  it("extracts text from a text_delta data line", () => {
+    const line =
+      'data:{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"HI"}}';
+    expect(extractTextDelta(line)).toBe("HI");
+  });
+
+  it("extracts text when data has a space after the colon", () => {
+    const line =
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" HI "}}';
+    expect(extractTextDelta(line)).toBe(" HI ");
+  });
+
+  it("returns null for thinking_delta (ignored)", () => {
+    const line =
+      'data:{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}';
+    expect(extractTextDelta(line)).toBeNull();
+  });
+
+  it("returns null for non-data lines (event: prefix)", () => {
+    expect(extractTextDelta("event:content_block_delta")).toBeNull();
+  });
+
+  it("returns null for malformed JSON", () => {
+    expect(extractTextDelta("data:{not json")).toBeNull();
+  });
+
+  it("returns null for the [DONE] sentinel", () => {
+    expect(extractTextDelta("data:[DONE]")).toBeNull();
+  });
+
+  it("returns null for empty data", () => {
+    expect(extractTextDelta("data:")).toBeNull();
+  });
+});
+
+describe("extractNonStreamText", () => {
+  it("concatenates text blocks in order", () => {
+    const body = {
+      content: [
+        { type: "text", text: "Hello" },
+        { type: "text", text: " world" },
+      ],
+    };
+    expect(extractNonStreamText(body)).toBe("Hello world");
+  });
+
+  it("ignores non-text blocks", () => {
+    const body = {
+      content: [
+        { type: "thinking", thinking: "hmm" },
+        { type: "text", text: "answer" },
+      ],
+    };
+    expect(extractNonStreamText(body)).toBe("answer");
+  });
+
+  it("returns empty when content is missing or not an array", () => {
+    expect(extractNonStreamText({})).toBe("");
+    expect(extractNonStreamText({ content: "nope" })).toBe("");
+    expect(extractNonStreamText(null)).toBe("");
   });
 });
