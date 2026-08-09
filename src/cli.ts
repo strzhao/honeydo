@@ -47,6 +47,10 @@ export interface TtsCliArgs {
   bitrate?: number;
   channel?: number;
   languageBoost?: string;
+  /** R1 karaoke: 字幕开关 */
+  subtitleEnable?: boolean;
+  /** R1 karaoke: 字幕粒度（默认 'word'） */
+  subtitleType?: "word" | "sentence";
 }
 export type TtsParse = TtsCliArgs | { error: string };
 
@@ -67,10 +71,15 @@ export function parseTtsArgs(argv: string[]): TtsParse {
         bitrate: { type: "string" },
         channel: { type: "string" },
         "language-boost": { type: "string" },
+        subtitle: { type: "boolean", default: false },
+        "subtitle-type": { type: "string" },
       },
       allowPositionals: true,
       allowNegative: true,
     });
+    const subtitleTypeRaw = values["subtitle-type"] as string | undefined;
+    const subtitleType: "word" | "sentence" | undefined =
+      subtitleTypeRaw === "sentence" ? "sentence" : subtitleTypeRaw === "word" ? "word" : undefined;
     return {
       text: positionals[0],
       voiceId: values.voice,
@@ -85,6 +94,8 @@ export function parseTtsArgs(argv: string[]): TtsParse {
       bitrate: num(values.bitrate, "bitrate"),
       channel: num(values.channel, "channel"),
       languageBoost: values["language-boost"],
+      subtitleEnable: values.subtitle === true,
+      subtitleType,
     };
   } catch (err) {
     return { error: err instanceof Error ? err.message : String(err) };
@@ -183,7 +194,9 @@ Options:
   --sample-rate <hz>    8000|16000|22050|24000|32000|44100
   --bitrate <bps>       64000...320000
   --channel <n>         1|2
-  --language-boost <l>  auto (default) | Chinese | English | ...`;
+  --language-boost <l>  auto (default) | Chinese | English | ...
+  --subtitle            Enable subtitle (word-level timestamps; R1 karaoke)
+  --subtitle-type <t>   word (default) | sentence`;
 
 const VC_HELP = `Usage: minimax voice-clone --voice <id> --audio <file> [options]
 
@@ -252,10 +265,15 @@ async function runTts(rest: string[]): Promise<void> {
         bitrate: parsed.bitrate,
         channel: parsed.channel,
         languageBoost: parsed.languageBoost,
+        subtitleEnable: parsed.subtitleEnable,
+        subtitleType: parsed.subtitleType,
       },
       output,
     );
     process.stdout.write(`Saved to: ${r.filePath}\n`);
+    if (r.timingsPath) {
+      process.stdout.write(`Timings: ${r.timingsPath}\n`);
+    }
     process.exit(0);
   } catch (err) {
     fail(

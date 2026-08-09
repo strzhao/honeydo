@@ -25,6 +25,14 @@ export interface TtsRequest {
   bitrate?: number;
   channel?: number;
   languageBoost?: string;
+  /**
+   * 字幕开关（R1 karaoke 字级时间戳用）。
+   * 开启后 MiniMax 在响应中返回 `data.subtitle_file`（OSS 临时 URL，~24h 有效），
+   * `generateSpeech` 会即时下载并写盘 `{output}.timings.json`。
+   */
+  subtitleEnable?: boolean;
+  /** 字幕粒度：'word'（字级，T9 实测中文每条 1 字）| 'sentence'（句级） */
+  subtitleType?: "word" | "sentence";
 }
 
 /** Build the /v1/t2a_v2 request body (pure — unit-tested). */
@@ -48,6 +56,9 @@ export function buildTtsRequestData(req: TtsRequest): Record<string, unknown> {
     },
     language_boost: req.languageBoost || DEFAULTS.languageBoost,
     stream: false,
+    // R1 karaoke: 顶层 subtitle_enable/subtitle_type（T9 实测顶层路径生效）
+    subtitle_enable: req.subtitleEnable ? true : undefined,
+    subtitle_type: req.subtitleEnable ? (req.subtitleType ?? "word") : undefined,
   });
 }
 
@@ -59,6 +70,8 @@ interface T2aResponse {
 export interface TtsResult {
   filePath: string;
   format: string;
+  /** 字幕时间戳 JSON 落盘路径（仅 subtitleEnable=true 且响应含 subtitle_file 时存在） */
+  timingsPath?: string;
 }
 
 /** Call /v1/t2a_v2, decode the hex-encoded audio, and write it to disk. */
@@ -78,5 +91,28 @@ export async function generateSpeech(
   const filePath = resolve(outputFile);
   await mkdir(dirname(filePath), { recursive: true });
   await writeFile(filePath, audioBuffer);
-  return { filePath, format };
+
+  // R1 karaoke: subtitle_file 即时下载落盘（OSS URL ~24h 时效，必须现在取）
+  let timingsPath: string | undefined;
+  if (req.subtitleEnable && response?.data?.subtitle_file) {
+    try {
+      const subtitleResp = await fetch(response.data.subtitle_file);
+      if (subtitleResp.ok) {
+        const subtitleText = await subtitleResp.text();
+        timingsPath = resolve(`${outputFile}.timings.json`);
+        await writeFile(timingsPath, subtitleText, "utf8");
+      } else {
+        // 下载失败不阻断音频生成（音频已写盘），仅 warn
+        process.stderr.write(
+          `minimax: subtitle_file download failed: ${subtitleResp.status} ${subtitleResp.statusText}\n`,
+        );
+      }
+    } catch (err) {
+      process.stderr.write(
+        `minimax: subtitle_file download error: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
+  }
+
+  return { filePath, format, timingsPath };
 }
