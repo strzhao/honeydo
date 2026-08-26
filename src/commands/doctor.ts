@@ -16,7 +16,7 @@ export function registerDoctor(program: Command): void {
           ['pythonGen (.venv-train)', fs.existsSync(rt.pythonGen)],
           ['pythonFast (.venv)', fs.existsSync(rt.pythonFast)],
           ['[image] Qwen-Image-2512 快照', fs.existsSync(rt.snapshot)],
-          ['[image] Qwen-Image-Edit-2509 快照', fs.existsSync(rt.snapshotEdit)],
+          ['[image] Qwen-Image-Edit-2511 快照', fs.existsSync(rt.snapshotEdit)],
           ['[image] Real-ESRGAN 权重', fs.existsSync('/tmp/RealESRGAN_x2.pth')],
         ];
         for (const [name, ok] of checks) console.log(`${ok ? '✓' : '✗'} ${name}`);
