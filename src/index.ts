@@ -4,6 +4,7 @@ import { registerImage } from './commands/image.js';
 import { registerVideo } from './commands/video.js';
 import { registerLora } from './commands/lora.js';
 import { registerDoctor } from './commands/doctor.js';
+import { registerSfx } from './commands/sfx.js';
 
 const program = new Command();
 
@@ -16,5 +17,6 @@ registerImage(program);
 registerVideo(program);
 registerLora(program);
 registerDoctor(program);
+registerSfx(program);
 
 program.parse();

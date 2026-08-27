@@ -26,6 +26,13 @@ export interface VideoRuntime {
   weightsDir: string;  // H3 权重本地目录 ~/.cache/mmh3turbo（dit.bin 等就绪即免下载）
 }
 
+/** 音效模态运行时（Dasheng-AudioGen，transformers<5 + MPS） */
+export interface AudioRuntime {
+  root: string;
+  pythonAudio: string; // <root>/.venv-audio/bin/python
+  pythonDir: string;   // CLI 自带 python 驱动目录（与 Runtime.pythonDir 同源）
+}
+
 /** 栈目录候选路径（不校验存在性；setup 可据此创建） */
 function rootCandidate(): string {
   const home = os.homedir();
@@ -46,6 +53,15 @@ export function resolveVideoRuntime(): VideoRuntime {
     pythonVideo: path.join(root, '.venv-video', 'bin', 'python'),
     mmh3turbo: path.join(root, '.venv-video', 'bin', 'mmh3turbo'),
     weightsDir: path.join(os.homedir(), '.cache', 'mmh3turbo'),
+  };
+}
+
+export function resolveAudioRuntime(): AudioRuntime {
+  const root = rootCandidate();
+  return {
+    root,
+    pythonAudio: path.join(root, '.venv-audio', 'bin', 'python'),
+    pythonDir: path.resolve(HERE, '..', 'python'),
   };
 }
 

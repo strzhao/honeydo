@@ -8,6 +8,16 @@
 ## 命令速查
 
 ```bash
+# 音效生成（Dasheng-AudioGen 本地，Apache 2.0 零成本；2026-08-27 加入）
+# prompt 必须纯英文场景描述（英文文本编码器，中文会生成人声废片）；内置质量门+自动剪裁
+lmedia sfx gen "A friendly cartoon bear making soft happy grunting sounds, single clean take" -o bear.wav
+lmedia sfx gen "A cute cartoon rabbit squeaking happily" --rolls 4 --keep-rolls -o rabbit.wav   # 4掷筛好+保留全部
+lmedia sfx gen "Calm forest ambience with gentle birds" --full -o forest.wav                    # 环境音：跳过剪裁留 10s
+# 管线：10s 生成 → 质量门(峰值≥-25dBFS+SNR≥20dB，全废自动加掷≤2) → 剪裁(两级静音检测+簇截断→1-3s) → 归一-6dBFS
+# venv：栈目录 .venv-audio（transformers<5）；~33s/掷；16kHz mono 是模型天花板（高保真待 Stable Audio 3 接入）
+```
+
+```bash
 # 文生图（官方 true CFG 4.0 + 中文负向模板已内置；风格+角色 LoRA 自动叠加、触发词自动注入、可选超分到发布尺寸）
 lmedia image gen "午后庭院，小蜜蜂男孩蹲在草地上推红色小汽车" \
   --style lbwatercolor --char pipi --upscale -o page.png
