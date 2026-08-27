@@ -1,4 +1,4 @@
-/** LoRA 注册表：~/.config/lmedia/loras.json
+/** LoRA 注册表：~/.config/limg/loras.json
  * 每个 LoRA：name / path / trigger / defaultWeight / kind（style|character|speed）
  * 首次运行自动播种内置三项（指向 ~/ml/lb-local-gen 已训练产物）。
  */
@@ -39,12 +39,12 @@ function seed(): LoraEntry[] {
       note: 'IP 角色·皮皮（蜜蜂男孩）',
     },
     {
-      name: 'lightning',
-      path: path.join(lb, 'loras/qwen-lightning-8steps.safetensors'),
+      name: 'lightning2512',
+      path: path.join(lb, 'loras/Qwen-Image-2512-Lightning-8steps-V1.0-bf16.safetensors'),
       trigger: '',
       defaultWeight: 1.0,
       kind: 'speed',
-      note: '8 步加速（mflux 路径专用）',
+      note: 'LightX2V 8 步蒸馏加速（bf16 配 bf16 base 防 MPS dtype 提升降速；--fast 自动注入；4 步极速版同目录）',
     },
   ];
 }
