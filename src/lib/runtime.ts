@@ -17,7 +17,17 @@ export interface Runtime {
   pythonDir: string;    // CLI 自带 python 驱动目录
 }
 
-export function resolveRuntime(): Runtime {
+/** 视频模态运行时（独立于图像栈：不触碰模型快照解析，快照缺失不阻断视频命令） */
+export interface VideoRuntime {
+  root: string;
+  venvVideo: string;   // mmh3turbo venv（MLX int8 Metal kernel）
+  pythonVideo: string; // <root>/.venv-video/bin/python
+  mmh3turbo: string;   // mmh3turbo 可执行文件
+  weightsDir: string;  // H3 权重本地目录 ~/.cache/mmh3turbo（dit.bin 等就绪即免下载）
+}
+
+/** 栈目录候选路径（不校验存在性；setup 可据此创建） */
+function rootCandidate(): string {
   const home = os.homedir();
   let root = process.env.LMEDIA_RUNTIME ?? '';
   if (!root) {
@@ -25,13 +35,29 @@ export function resolveRuntime(): Runtime {
     if (fs.existsSync(link)) root = fs.realpathSync(link);
   }
   if (!root) root = path.join(home, 'ml', 'lb-local-gen');
+  return root;
+}
+
+export function resolveVideoRuntime(): VideoRuntime {
+  const root = rootCandidate();
+  return {
+    root,
+    venvVideo: path.join(root, '.venv-video'),
+    pythonVideo: path.join(root, '.venv-video', 'bin', 'python'),
+    mmh3turbo: path.join(root, '.venv-video', 'bin', 'mmh3turbo'),
+    weightsDir: path.join(os.homedir(), '.cache', 'mmh3turbo'),
+  };
+}
+
+export function resolveRuntime(): Runtime {
+  const root = rootCandidate();
   if (!fs.existsSync(root)) {
     throw new Error(
       `运行时未找到: ${root}\n` +
       `请设置 LMEDIA_RUNTIME 指向本地生成栈目录（含 .venv/.venv-train），或创建软链: mkdir -p ~/.lmedia && ln -s <栈目录> ~/.lmedia/runtime`
     );
   }
-  const hf = path.join(home, '.cache', 'huggingface', 'hub');
+  const hf = path.join(os.homedir(), '.cache', 'huggingface', 'hub');
   const snapOf = (repo: string) => {
     const dir = path.join(hf, `models--${repo.replace('/', '--')}`, 'snapshots');
     if (!fs.existsSync(dir)) throw new Error(`模型未下载: ${repo}（先运行 lmedia doctor 安装指引）`);
