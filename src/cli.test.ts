@@ -1,17 +1,21 @@
 import { describe, expect, it } from "vitest";
 import {
   API_DEFAULT_MAX_TOKENS,
+  applyPickerKey,
   buildAgyArgs,
   buildApiBody,
   buildApiEndpoint,
   buildClaudeArgs,
+  buildQuotaRequest,
   CHARACTER_LIMIT,
   extractNonStreamText,
   extractTextDelta,
+  formatQuota,
   type ParseResult,
   parseApiArgs,
   parseCliArgs,
-  parsePickerChoice,
+  parseGlmQuota,
+  parseKimiUsages,
   parseSubcommand,
   truncate,
 } from "./cli.js";
@@ -184,6 +188,99 @@ describe("parseCliArgs", () => {
   });
 });
 
+describe("quota helpers // C-Q1..C-Q3", () => {
+  it("buildQuotaRequest: kimi Bearer / glm bare / other → null", () => {
+    expect(
+      buildQuotaRequest({
+        ANTHROPIC_BASE_URL: "https://api.kimi.com/coding/",
+        ANTHROPIC_AUTH_TOKEN: "k",
+      }),
+    ).toEqual({
+      kind: "kimi",
+      url: "https://api.kimi.com/coding/v1/usages",
+      authHeader: "Bearer k",
+    });
+    expect(
+      buildQuotaRequest({
+        ANTHROPIC_BASE_URL: "https://open.bigmodel.cn/api/anthropic",
+        ANTHROPIC_AUTH_TOKEN: "g",
+      }),
+    ).toEqual({
+      kind: "glm",
+      url: "https://open.bigmodel.cn/api/monitor/usage/quota/limit",
+      authHeader: "g",
+    });
+    expect(
+      buildQuotaRequest({
+        ANTHROPIC_BASE_URL: "https://api.deepseek.com",
+        ANTHROPIC_AUTH_TOKEN: "d",
+      }),
+    ).toBeNull();
+  });
+
+  it("parseKimiUsages: string numbers, used-missing fallback, no throw", () => {
+    const q = parseKimiUsages({
+      usage: {
+        used: "170000",
+        limit: "1000000",
+        resetTime: "2026-09-01T00:00:00Z",
+      },
+      limits: [
+        {
+          window: { duration: 300, timeUnit: "MINUTE" },
+          detail: {
+            limit: "100",
+            remaining: "58",
+            resetTime: "2026-08-30T14:13:00Z",
+          },
+        },
+      ],
+    });
+    expect(q.short?.pct).toBe(42);
+    expect(q.weekly?.pct).toBe(17);
+    expect(() => parseKimiUsages("x")).not.toThrow();
+    expect(parseKimiUsages("x")).toEqual({});
+  });
+
+  it("parseGlmQuota: sorts by nextResetTime, first=short last=weekly", () => {
+    const q = parseGlmQuota({
+      data: {
+        limits: [
+          { type: "TOKENS_LIMIT", percentage: 17, nextResetTime: "2026-09-01" },
+          {
+            type: "TOKENS_LIMIT",
+            percentage: 42,
+            nextResetTime: "2026-08-30T14:00:00Z",
+          },
+        ],
+      },
+    });
+    expect(q.short?.pct).toBe(42);
+    expect(q.weekly?.pct).toBe(17);
+  });
+
+  it("formatQuota: dual/short-only/relative units/expired", () => {
+    const NOW = Date.parse("2026-08-30T12:00:00Z");
+    const at = (m: number) => new Date(NOW + m * 60_000).toISOString();
+    expect(
+      formatQuota(
+        {
+          short: { pct: 42, resetIso: at(133) },
+          weekly: { pct: 17, resetIso: at(3000) },
+        },
+        NOW,
+      ),
+    ).toBe("5h:42% wk:17% ↻2h13m");
+    expect(formatQuota({ short: { pct: 7, resetIso: at(240) } }, NOW)).toBe(
+      "5h:7% ↻4h",
+    );
+    expect(formatQuota({ short: { pct: 1, resetIso: at(-5) } }, NOW)).toBe(
+      "5h:1%",
+    );
+    expect(formatQuota({}, NOW)).toBe("");
+  });
+});
+
 describe("parseSubcommand", () => {
   it("routes 'agy' as the agy subcommand and strips it from rest", () => {
     const r = parseSubcommand(["agy", "-p", "hi"]);
@@ -271,38 +368,169 @@ describe("buildClaudeArgs", () => {
   });
 });
 
-describe("parsePickerChoice", () => {
-  it("blank input skips (Enter = keep claude default config)", () => {
-    expect(parsePickerChoice("", 3)).toEqual({ kind: "skip" });
-    expect(parsePickerChoice("   ", 3)).toEqual({ kind: "skip" });
+describe("applyPickerKey", () => {
+  it("arrow-up moves up with wrap (index 0 → count-1)", () => {
+    expect(applyPickerKey({ name: "up" }, 0, 5)).toEqual({
+      type: "move",
+      index: 4,
+    });
   });
 
-  it("'0' skips (explicit 不切换 entry)", () => {
-    expect(parsePickerChoice("0", 3)).toEqual({ kind: "skip" });
-    expect(parsePickerChoice(" 0 ", 3)).toEqual({ kind: "skip" });
+  it("'k' moves up like arrow-up", () => {
+    expect(applyPickerKey({ name: "k" }, 2, 5)).toEqual({
+      type: "move",
+      index: 1,
+    });
+    expect(applyPickerKey({ name: "k" }, 0, 5)).toEqual({
+      type: "move",
+      index: 4,
+    });
   });
 
-  it("integer 1..count selects (index-1)", () => {
-    expect(parsePickerChoice("1", 3)).toEqual({ kind: "select", index: 0 });
-    expect(parsePickerChoice("3", 3)).toEqual({ kind: "select", index: 2 });
-    expect(parsePickerChoice(" 2 ", 3)).toEqual({ kind: "select", index: 1 });
+  it("arrow-down moves down", () => {
+    expect(applyPickerKey({ name: "down" }, 1, 5)).toEqual({
+      type: "move",
+      index: 2,
+    });
   });
 
-  it("out-of-range numbers are invalid", () => {
-    expect(parsePickerChoice("4", 3)).toEqual({ kind: "invalid" });
-    expect(parsePickerChoice("-1", 3)).toEqual({ kind: "invalid" });
+  it("'j' moves down like arrow-down", () => {
+    expect(applyPickerKey({ name: "j" }, 3, 5)).toEqual({
+      type: "move",
+      index: 4,
+    });
   });
 
-  it("non-numeric input is invalid", () => {
-    expect(parsePickerChoice("abc", 3)).toEqual({ kind: "invalid" });
-    expect(parsePickerChoice("1.5", 3)).toEqual({ kind: "invalid" });
-    expect(parsePickerChoice("+2", 3)).toEqual({ kind: "invalid" });
+  it("down at the last index wraps to 0 (环形 wrap)", () => {
+    expect(applyPickerKey({ name: "down" }, 4, 5)).toEqual({
+      type: "move",
+      index: 0,
+    });
+    expect(applyPickerKey({ name: "j" }, 4, 5)).toEqual({
+      type: "move",
+      index: 0,
+    });
   });
 
-  it("count=0: every number is invalid, skip still works", () => {
-    expect(parsePickerChoice("1", 0)).toEqual({ kind: "invalid" });
-    expect(parsePickerChoice("0", 0)).toEqual({ kind: "skip" });
-    expect(parsePickerChoice("", 0)).toEqual({ kind: "skip" });
+  it("return confirms the current row", () => {
+    expect(applyPickerKey({ name: "return" }, 2, 5)).toEqual({
+      type: "confirm",
+    });
+    expect(applyPickerKey({ name: "return" }, 0, 1)).toEqual({
+      type: "confirm",
+    });
+    // "enter" is the LF byte — ttys may substitute it for CR in input
+    // buffered before raw mode; treat it as Enter too (defensive superset).
+    expect(applyPickerKey({ name: "enter" }, 2, 5)).toEqual({
+      type: "confirm",
+    });
+  });
+
+  it("escape skips (不切换)", () => {
+    expect(applyPickerKey({ name: "escape" }, 2, 5)).toEqual({ type: "skip" });
+    expect(applyPickerKey({ name: "escape" }, 0, 1)).toEqual({ type: "skip" });
+  });
+
+  it("Emacs C-n moves down (含 wrap) [revise-2]", () => {
+    expect(applyPickerKey({ name: "n", ctrl: true }, 0, 5)).toEqual({
+      type: "move",
+      index: 1,
+    });
+    expect(applyPickerKey({ name: "n", ctrl: true }, 4, 5)).toEqual({
+      type: "move",
+      index: 0,
+    });
+  });
+
+  it("Emacs C-p moves up (含 wrap) [revise-2]", () => {
+    expect(applyPickerKey({ name: "p", ctrl: true }, 2, 5)).toEqual({
+      type: "move",
+      index: 1,
+    });
+    expect(applyPickerKey({ name: "p", ctrl: true }, 0, 5)).toEqual({
+      type: "move",
+      index: 4,
+    });
+  });
+
+  it("Emacs C-g skips (≡ escape) [revise-2]", () => {
+    expect(applyPickerKey({ name: "g", ctrl: true }, 2, 5)).toEqual({
+      type: "skip",
+    });
+  });
+
+  it("Emacs M-< / M-> jump to first/last (absolute, no wrap) [revise-2]", () => {
+    expect(applyPickerKey({ name: "<", meta: true }, 4, 5)).toEqual({
+      type: "move",
+      index: 0,
+    });
+    expect(applyPickerKey({ name: ">", meta: true }, 0, 5)).toEqual({
+      type: "move",
+      index: 4,
+    });
+    expect(applyPickerKey({ name: ">", meta: true }, 0, 1)).toEqual({
+      type: "move",
+      index: 0,
+    });
+  });
+
+  it("horizontal/paging Emacs keys and bare n/p are noop [revise-2]", () => {
+    for (const name of ["f", "b", "a", "e", "v"]) {
+      expect(applyPickerKey({ name, ctrl: true }, 2, 5)).toEqual({
+        type: "noop",
+      });
+    }
+    expect(applyPickerKey({ name: "v", meta: true }, 2, 5)).toEqual({
+      type: "noop",
+    });
+    expect(applyPickerKey({ name: "n" }, 2, 5)).toEqual({ type: "noop" });
+    expect(applyPickerKey({ name: "p" }, 2, 5)).toEqual({ type: "noop" });
+  });
+
+  it("any other key is a noop (incl. ctrl-c name 'c' — handled by the caller)", () => {
+    expect(applyPickerKey({ name: "a" }, 2, 5)).toEqual({ type: "noop" });
+    expect(applyPickerKey({ name: "space" }, 2, 5)).toEqual({ type: "noop" });
+    expect(applyPickerKey({ name: "c" }, 2, 5)).toEqual({ type: "noop" });
+    expect(applyPickerKey({ name: "tab" }, 2, 5)).toEqual({ type: "noop" });
+    expect(applyPickerKey({ name: "backspace" }, 2, 5)).toEqual({
+      type: "noop",
+    });
+  });
+
+  it("nameless key object → noop", () => {
+    expect(applyPickerKey({}, 2, 5)).toEqual({ type: "noop" });
+  });
+
+  it("count=1 (only the 不切换 row): moves stay at 0", () => {
+    expect(applyPickerKey({ name: "up" }, 0, 1)).toEqual({
+      type: "move",
+      index: 0,
+    });
+    expect(applyPickerKey({ name: "down" }, 0, 1)).toEqual({
+      type: "move",
+      index: 0,
+    });
+    expect(applyPickerKey({ name: "k" }, 0, 1)).toEqual({
+      type: "move",
+      index: 0,
+    });
+    expect(applyPickerKey({ name: "j" }, 0, 1)).toEqual({
+      type: "move",
+      index: 0,
+    });
+  });
+
+  it("count=0: moves are noop (defensive — nothing to render)", () => {
+    expect(applyPickerKey({ name: "up" }, 0, 0)).toEqual({ type: "noop" });
+    expect(applyPickerKey({ name: "down" }, 0, 0)).toEqual({ type: "noop" });
+    expect(applyPickerKey({ name: "j" }, 3, 0)).toEqual({ type: "noop" });
+    expect(applyPickerKey({ name: "k" }, 3, 0)).toEqual({ type: "noop" });
+    expect(applyPickerKey({ name: "n", ctrl: true }, 0, 0)).toEqual({
+      type: "noop",
+    });
+    expect(applyPickerKey({ name: ">", meta: true }, 0, 0)).toEqual({
+      type: "noop",
+    });
   });
 });
 

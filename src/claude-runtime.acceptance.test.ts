@@ -80,10 +80,23 @@ function makeDeps(
     readCcSwitchProvider:
       overrides.readCcSwitchProvider ??
       vi.fn(async () => ({ ok: true as const, providers: [K3_RAW] })),
-    // C-D3 新增必填接缝；默认 skip → 不注入 settings
+    // C-D3 新增必填接缝；默认 skip → 不注入 settings（签名按 picker v2 适配）
     pickProvider:
       overrides.pickProvider ??
-      vi.fn(async (_names: string[]): Promise<string | undefined> => undefined),
+      vi.fn(
+        async (
+          _entries: { name: string; host?: string }[],
+          _initialIndex: number,
+        ): Promise<{ kind: "skip" }> => ({ kind: "skip" }),
+      ),
+    // picker v2 新增记忆接缝；默认无记忆
+    readLastProvider: vi.fn(async (): Promise<string | undefined> => undefined),
+    writeLastProvider: vi.fn(async (): Promise<void> => {}),
+    // picker v3（revise-3 quota）新增必填接缝；claude-runtime 断言不涉 quota，
+    // 机械适配：默认空 Map
+    fetchProviderQuotas: vi.fn(
+      async (): Promise<Map<string, string>> => new Map(),
+    ),
     runClaude:
       overrides.runClaude ??
       vi.fn(

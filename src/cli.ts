@@ -13,9 +13,11 @@
  * The claude backend resolves `--provider <name>` from the cc-switch SQLite
  * DB (read-only) and never rewrites ~/.claude/settings.json — the provider
  * switch happens entirely through claude's own `--settings` merge. In a TTY
- * without --provider it offers an interactive picker over the cc-switch
- * provider list (Enter skips); without a TTY the picker never triggers (zero
- * prompts, zero DB reads) so skills/CI never hang.
+ * without --provider it offers an interactive arrow-key picker over the
+ * cc-switch provider list (↑↓/j/k move · Enter confirm · Esc keep default);
+ * the last confirmed provider is remembered in ~/.config/gcli/last-provider
+ * and reused silently in print mode. Without a TTY the picker never triggers
+ * (zero prompts, zero DB reads, zero memory-file IO) so skills/CI never hang.
  *
  * Note: on the default (claude) path --yolo/--sandbox are rejected (exit 2);
  * agy users must opt in via the explicit `gcli agy` subcommand.
@@ -25,10 +27,10 @@
  */
 
 import { spawn } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
-import { createInterface } from "node:readline";
+import { dirname, resolve } from "node:path";
+import { emitKeypressEvents } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
@@ -45,6 +47,25 @@ const VERSION_TIMEOUT_MS = 10_000;
  * `--provider <name>` for the claude backend.
  */
 export const CC_SWITCH_DB_PATH = `${homedir()}/.cc-switch/cc-switch.db`;
+
+/**
+ * Memory file for the last picker-confirmed provider (D2). Content is a
+ * single UTF-8 line with the provider name. Read on the TTY claude path with
+ * no --provider (exact-name match against the current list; mismatch/missing/
+ * unreadable → silently ignored); written best-effort after a picker confirm.
+ * Never read or written on a non-TTY path (zero side effects for skills/CI).
+ */
+export const LAST_PROVIDER_PATH = `${homedir()}/.config/gcli/last-provider`;
+
+/**
+ * Quota subtitle cache (revise-3, C-Q5): `{[name]: {ts, ok, text?}}`.
+ * TTL ok 60s / fail 15s (statusline-sage semantics); reads/writes are
+ * best-effort — the quota subtitle is an optimization, never an error.
+ */
+export const QUOTA_CACHE_PATH = `${homedir()}/.config/gcli/quota-cache.json`;
+const QUOTA_TTL_OK_MS = 60_000;
+const QUOTA_TTL_FAIL_MS = 15_000;
+const QUOTA_FETCH_TIMEOUT_MS = 2_500;
 
 /** Provider-name allowlist (C4b). Names outside this set are rejected. */
 const PROVIDER_NAME_RE = /^[A-Za-z0-9 &._-]+$/;
@@ -69,11 +90,20 @@ export type ProviderEnvResult =
   | { env: Record<string, string> }
   | { error: string };
 
-/** One parsed picker input line (C-D2). */
-export type PickerChoice =
-  | { kind: "select"; index: number }
-  | { kind: "skip" }
-  | { kind: "invalid" };
+/** One picker keypress → state transition (C-P2). */
+export type PickerKeyAction =
+  | { type: "move"; index: number }
+  | { type: "confirm" }
+  | { type: "skip" }
+  | { type: "noop" };
+
+/** One selectable row of the arrow-key picker: a cc-switch provider. */
+export type PickerEntry = { name: string; quota?: string };
+
+/** Result of the arrow-key picker (C-P1): a picked provider, or a skip. */
+export type PickerOutcome =
+  | { kind: "select"; entry: PickerEntry }
+  | { kind: "skip" };
 
 /** A cc-switch provider row as exposed to the claude backend. */
 export type RawProvider = { name: string; settingsConfig: unknown };
@@ -135,13 +165,43 @@ export type RunDeps = {
   ) => Promise<InteractiveSpawnResult>;
   isInteractive: () => boolean;
   /**
-   * TTY-only provider picker (C-D2): present the numbered cc-switch provider
-   * list and resolve the chosen provider name, or undefined when the user
-   * skips (Enter / 0 / EOF). Only ever invoked on the claude path in a TTY
-   * with no --provider — non-interactive callers (skills/CI/pipes) must see
-   * zero prompts and zero extra cc-switch DB reads.
+   * TTY-only arrow-key provider picker (C-P1/C-P3): present the cc-switch
+   * provider entries (the production impl appends its own trailing 不切换
+   * row — `entries` holds providers only) and resolve the confirmed entry,
+   * or {kind:"skip"} on Esc / the 不切换 row. `initialIndex` is the caller-
+   * computed row to highlight (memory hit or 0); implementations clamp it.
+   * Only ever invoked on the claude path in a TTY with no --provider —
+   * non-interactive callers (skills/CI/pipes) must see zero prompts and
+   * zero extra cc-switch DB reads.
    */
-  pickProvider: (names: string[]) => Promise<string | undefined>;
+  pickProvider: (
+    entries: PickerEntry[],
+    initialIndex: number,
+  ) => Promise<PickerOutcome>;
+  /**
+   * Quota subtitles (revise-3, C-Q4): given every menu provider's {name, env},
+   * resolve name → formatted quota text (only providers with usable data are
+   * in the Map). Only invoked on the TTY menu path right before pickProvider —
+   * silent reuse / explicit --provider / non-TTY / degraded paths never call.
+   */
+  fetchProviderQuotas: (
+    items: {
+      name: string;
+      env: Record<string, string>;
+    }[],
+  ) => Promise<Map<string, string>>;
+  /**
+   * Read the remembered provider name (D2): trimmed first line of
+   * LAST_PROVIDER_PATH, or undefined when missing/empty/unreadable. Only
+   * invoked on the TTY claude path with no --provider.
+   */
+  readLastProvider: () => Promise<string | undefined>;
+  /**
+   * Persist the picker-confirmed provider name (D2). Best-effort: failures
+   * are swallowed (memory is an optimization, never an error). Only invoked
+   * after an arrow-key picker confirm, before any backend spawn.
+   */
+  writeLastProvider: (name: string) => Promise<void>;
 };
 
 export type RunOutcome = { exitCode: number; stdout: string; stderr: string };
@@ -293,18 +353,249 @@ export function buildSettingsEnv(
 }
 
 /**
- * Parse one picker input line (C-D2/D3):
- * - blank or "0" → skip (keep claude's default config)
- * - integer 1..count → select that entry (index = n-1)
- * - anything else → invalid (the caller re-asks)
+ * Shape of a readline keypress event's `key` argument (C-P2, revise-2).
  */
-export function parsePickerChoice(line: string, count: number): PickerChoice {
-  const trimmed = line.trim();
-  if (trimmed === "" || trimmed === "0") return { kind: "skip" };
-  if (!/^\d+$/.test(trimmed)) return { kind: "invalid" };
-  const n = Number.parseInt(trimmed, 10);
-  if (n < 1 || n > count) return { kind: "invalid" };
-  return { kind: "select", index: n - 1 };
+export type PickerKeyInput = { name?: string; ctrl?: boolean; meta?: boolean };
+
+/**
+ * Map one arrow-key picker keypress to its state transition (C-P2, revise-2).
+ *
+ * `k` is the keypress event's `key` object:
+ * - "up" / "k"   → move up one row, wrapping past the top (环形)
+ * - "down" / "j" → move down one row, wrapping past the bottom (环形)
+ * - "return" / "enter" → confirm the current row (the physical Enter key
+ *   emits "return" in raw mode; "enter" is the LF byte, which a tty may
+ *   substitute for CR in input buffered before raw mode was enabled)
+ * - "escape"     → skip (不切换)
+ * - Emacs (revise-2): ctrl+"n" ≡ down, ctrl+"p" ≡ up (same wrap); ctrl+"g"
+ *   ≡ escape → skip; meta+"<" → first row (absolute), meta+">" → last row
+ *   (absolute). Horizontal Emacs keys (C-f/C-b/C-a/C-e) and paging (C-v/M-v)
+ *   are deliberately NOT mapped — meaningless in a vertical menu.
+ * - anything else → noop (ctrl-c is handled by the caller: restore raw-mode,
+ *   exit 130)
+ *
+ * `index` is the highlighted row, `count` the total rendered rows INCLUDING
+ * the trailing 不切换 row. Movement wraps with `(index±1+count)%count`; with
+ * count <= 0 moves are a noop (nothing is rendered).
+ */
+export function applyPickerKey(
+  k: PickerKeyInput,
+  index: number,
+  count: number,
+): PickerKeyAction {
+  const name = k.name;
+  if (name === undefined) return { type: "noop" };
+  if (k.ctrl === true) {
+    // Emacs cluster (revise-2): C-n/C-p move, C-g skips; other C-x noop.
+    if (name === "n") {
+      if (count <= 0) return { type: "noop" };
+      return { type: "move", index: (index + 1) % count };
+    }
+    if (name === "p") {
+      if (count <= 0) return { type: "noop" };
+      return { type: "move", index: (index - 1 + count) % count };
+    }
+    if (name === "g") return { type: "skip" };
+    return { type: "noop" };
+  }
+  if (k.meta === true) {
+    // M-< / M-> jump to the first/last row (absolute, no wrap).
+    if (name === "<" && count > 0) return { type: "move", index: 0 };
+    if (name === ">" && count > 0) return { type: "move", index: count - 1 };
+    return { type: "noop" };
+  }
+  if (name === "up" || name === "k") {
+    if (count <= 0) return { type: "noop" };
+    return { type: "move", index: (index - 1 + count) % count };
+  }
+  if (name === "down" || name === "j") {
+    if (count <= 0) return { type: "noop" };
+    return { type: "move", index: (index + 1) % count };
+  }
+  if (name === "return" || name === "enter") return { type: "confirm" };
+  if (name === "escape") return { type: "skip" };
+  return { type: "noop" };
+}
+
+// ---------------------------------------------------------------------------
+// Quota subtitle pure helpers (revise-3, C-Q1..C-Q3) — protocol knowledge
+// reused from martin/statusline-sage (kimi /coding/v1/usages, glm
+// /api/monitor/usage/quota/limit); rewritten zero-dep for gcli.
+// ---------------------------------------------------------------------------
+
+/** One rate-limit window: usage percentage + ISO8601 reset timestamp. */
+export type QuotaWindow = { pct: number; resetIso: string };
+
+/** Parsed quota windows: short = 5h rolling, weekly = long window. */
+export type QuotaWindows = { short?: QuotaWindow; weekly?: QuotaWindow };
+
+/**
+ * Map a provider env to its quota API request (C-Q1):
+ * - base contains kimi.com / moonshot → kimi: `{domain}/coding/v1/usages`,
+ *   `Authorization: Bearer <token>` (bare token gets 401)
+ * - base contains bigmodel / z.ai → glm: `{domain}/api/monitor/usage/quota/limit`,
+ *   `Authorization: <token>` (NO Bearer prefix)
+ * - anything else (deepseek / packy / anthropic official / …) or missing
+ *   base/token/scheme → null: no quota API, zero requests, no subtitle.
+ */
+export function buildQuotaRequest(env: {
+  ANTHROPIC_BASE_URL?: string;
+  ANTHROPIC_AUTH_TOKEN?: string;
+}): { kind: "kimi" | "glm"; url: string; authHeader: string } | null {
+  const base = env.ANTHROPIC_BASE_URL;
+  const token = env.ANTHROPIC_AUTH_TOKEN;
+  if (typeof base !== "string" || base === "") return null;
+  if (typeof token !== "string" || token === "") return null;
+  const m = /^https?:\/\/[^/]+/.exec(base);
+  if (m === null) return null;
+  const domain = m[0];
+  if (base.includes("kimi.com") || base.includes("moonshot")) {
+    return {
+      kind: "kimi",
+      url: `${domain}/coding/v1/usages`,
+      authHeader: `Bearer ${token}`,
+    };
+  }
+  if (base.includes("bigmodel") || base.includes("z.ai")) {
+    return {
+      kind: "glm",
+      url: `${domain}/api/monitor/usage/quota/limit`,
+      authHeader: token,
+    };
+  }
+  return null;
+}
+
+/** Coerce a kimi/glm numeric field (they arrive as JSON strings) safely. */
+function toNum(v: unknown): number | undefined {
+  const n = typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * Normalize a reset timestamp to an ISO string (runtime-verified: kimi's
+ * resetTime is ISO8601, but GLM's nextResetTime is an epoch-ms NUMBER —
+ * statusline-sage never parses dates so this was only discoverable live).
+ * Accepts string (ISO) or finite positive number (epoch ms); else undefined.
+ */
+function toResetIso(v: unknown): string | undefined {
+  if (typeof v === "string" && v !== "") return v;
+  if (typeof v === "number" && Number.isFinite(v) && v > 0) {
+    const iso = new Date(v).toISOString();
+    return iso;
+  }
+  return undefined;
+}
+
+/**
+ * One kimi-style usage window (C-Q2): used/limit are strings; used may be
+ * absent → limit − remaining; any malformed piece drops the whole window
+ * (never throws). pct = floor(used/limit*100).
+ */
+function kimiWindowOf(detail: unknown): QuotaWindow | undefined {
+  if (typeof detail !== "object" || detail === null) return undefined;
+  const d = detail as Record<string, unknown>;
+  const limit = toNum(d.limit);
+  let used = toNum(d.used);
+  if (used === undefined) {
+    const remaining = toNum(d.remaining);
+    if (limit !== undefined && remaining !== undefined)
+      used = limit - remaining;
+  }
+  if (limit === undefined || used === undefined || limit <= 0) return undefined;
+  const resetIso = toResetIso(d.resetTime);
+  if (resetIso === undefined) return undefined;
+  return { pct: Math.floor((used / limit) * 100), resetIso };
+}
+
+/**
+ * Parse kimi `/coding/v1/usages` (C-Q2): `limits[]` entries with
+ * window.duration == 300 + MINUTE → short (5h) window; top-level `usage` →
+ * weekly. Malformed shapes yield missing windows, never throw.
+ */
+export function parseKimiUsages(body: unknown): QuotaWindows {
+  const out: QuotaWindows = {};
+  if (typeof body !== "object" || body === null) return out;
+  const b = body as Record<string, unknown>;
+  const limits = Array.isArray(b.limits) ? b.limits : [];
+  for (const item of limits) {
+    if (typeof item !== "object" || item === null) continue;
+    const rec = item as Record<string, unknown>;
+    if (typeof rec.window !== "object" || rec.window === null) continue;
+    const w = rec.window as Record<string, unknown>;
+    if (toNum(w.duration) !== 300) continue;
+    const unit = typeof w.timeUnit === "string" ? w.timeUnit : "";
+    if (!unit.includes("MINUTE")) continue;
+    const win = kimiWindowOf(rec.detail);
+    if (win !== undefined) out.short = win;
+  }
+  const weekly = kimiWindowOf(b.usage);
+  if (weekly !== undefined) out.weekly = weekly;
+  return out;
+}
+
+/**
+ * Parse GLM `/api/monitor/usage/quota/limit` (C-Q2): data.limits[] entries
+ * with type == "TOKENS_LIMIT"; sorted by nextResetTime ascending — first is
+ * the short (5h) window, last the weekly one.
+ */
+export function parseGlmQuota(body: unknown): QuotaWindows {
+  const out: QuotaWindows = {};
+  if (typeof body !== "object" || body === null) return out;
+  const data = (body as Record<string, unknown>).data;
+  if (typeof data !== "object" || data === null) return out;
+  const limitsRaw = (data as Record<string, unknown>).limits;
+  const limits = Array.isArray(limitsRaw) ? limitsRaw : [];
+  const wins: QuotaWindow[] = [];
+  for (const item of limits) {
+    if (typeof item !== "object" || item === null) continue;
+    const r = item as Record<string, unknown>;
+    if (r.type !== "TOKENS_LIMIT") continue;
+    const pct = toNum(r.percentage);
+    if (pct === undefined) continue;
+    const resetIso = toResetIso(r.nextResetTime);
+    if (resetIso === undefined) continue;
+    wins.push({ pct: Math.floor(pct), resetIso });
+  }
+  wins.sort((a, b) =>
+    a.resetIso < b.resetIso ? -1 : a.resetIso > b.resetIso ? 1 : 0,
+  );
+  if (wins.length > 0) out.short = wins[0];
+  if (wins.length > 1) out.weekly = wins[wins.length - 1];
+  return out;
+}
+
+/** Render a reset timestamp as a short relative duration (C-Q3). */
+function formatReset(
+  iso: string | undefined,
+  nowMs: number,
+): string | undefined {
+  if (iso === undefined) return undefined;
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return undefined;
+  const min = Math.floor((t - nowMs) / 60_000);
+  if (min < 1) return undefined; // already reset / about to — omit
+  if (min < 60) return `${min}m`;
+  const h = Math.floor(min / 60);
+  const rm = min % 60;
+  if (h < 24) return rm > 0 ? `${h}h${rm}m` : `${h}h`;
+  const d = Math.floor(h / 24);
+  const rh = h % 24;
+  return rh > 0 ? `${d}d${rh}h` : `${d}d`;
+}
+
+/**
+ * Format quota windows as the menu subtitle (C-Q3): `5h:P% wk:P% ↻<rel>`
+ * (short reset preferred for the ↻ segment); missing windows degrade; a
+ * missing/expired reset omits the ↻ segment entirely; no windows → "".
+ */
+export function formatQuota(q: QuotaWindows, nowMs: number): string {
+  const parts: string[] = [];
+  if (q.short !== undefined) parts.push(`5h:${q.short.pct}%`);
+  if (q.weekly !== undefined) parts.push(`wk:${q.weekly.pct}%`);
+  if (parts.length === 0) return "";
+  const rel = formatReset(q.short?.resetIso ?? q.weekly?.resetIso, nowMs);
+  return rel === undefined ? parts.join(" ") : `${parts.join(" ")} ↻${rel}`;
 }
 
 export interface ClaudeOptions {
@@ -458,6 +749,8 @@ export interface ParsedArgs {
   version: boolean;
   help: boolean;
   provider?: string;
+  /** Force the provider picker menu, even in print mode (claude path only). */
+  pick: boolean;
   /** Args after `--`, passed through to the backend verbatim. */
   passthrough: string[];
 }
@@ -480,6 +773,7 @@ const KNOWN_OPTION_NAMES = new Set([
   "version",
   "help",
   "provider",
+  "pick",
 ]);
 
 export function parseCliArgs(argv: string[]): ParseResult {
@@ -503,6 +797,7 @@ export function parseCliArgs(argv: string[]): ParseResult {
         version: { type: "boolean" },
         help: { type: "boolean" },
         provider: { type: "string" },
+        pick: { type: "boolean" },
       },
       strict: false,
       tokens: true,
@@ -546,6 +841,7 @@ export function parseCliArgs(argv: string[]): ParseResult {
       help: values.help === true,
       provider:
         typeof values.provider === "string" ? values.provider : undefined,
+      pick: values.pick === true,
       passthrough,
     };
   } catch (err) {
@@ -1144,52 +1440,282 @@ function readStdin(): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// Provider picker (TTY only) — production deps.pickProvider
+// Provider picker (TTY only) — arrow keys, zero deps
 // ---------------------------------------------------------------------------
 
 /**
- * Production deps.pickProvider: numbered menu on stderr, choice read from
- * stdin via readline (zero deps — no inquirer/enquirer).
+ * Production deps.pickProvider: arrow-key menu rendered entirely on stderr
+ * (stdout stays pipe-clean). ↑↓/j/k move with wrap, Enter confirms, Esc
+ * skips, ctrl-c restores the terminal then exits 130; any other key is a
+ * noop (C-P1).
  *
- * The menu and prompt go to stderr so print-mode stdout stays pipe-clean.
- * readline runs with terminal:false (no raw-mode juggling) and is closed
- * before any backend spawn, so the claude TUI can take stdin over cleanly
- * afterwards. Invalid input re-asks; blank/"0" → skip (undefined); EOF →
- * skip; Ctrl-C takes the process-default SIGINT.
+ * Zero deps: `readline.emitKeypressEvents` + raw-mode stdin + hand-written
+ * ANSI. Rows are redrawn in place (cursor-up + `\r` + clear-to-EOL per line)
+ * so navigation leaves no ghosting (C-P3). The trailing 不切换 row is
+ * appended here — `entries` holds providers only (D4); confirming it (or
+ * pressing Esc) resolves {kind:"skip"}.
+ *
+ * Raw-mode lifecycle: `process.stdin.isRaw` is saved before
+ * `setRawMode(true)` and restored on EVERY exit path (confirm / Esc / ctrl-c
+ * / stream end / error) before the promise settles, and the keypress (and
+ * its lazily-attached internal `data`) listeners are removed — so the
+ * spawned claude TUI takes stdin over cleanly. The picker always completes
+ * before any backend spawn.
  */
-function pickProviderInteractive(names: string[]): Promise<string | undefined> {
+function pickProviderInteractive(
+  entries: PickerEntry[],
+  initialIndex: number,
+): Promise<PickerOutcome> {
   return new Promise((resolvePromise) => {
-    const rl = createInterface({
-      input: process.stdin,
-      output: process.stderr,
-      terminal: false,
-    });
-    const menu = [
-      "gcli: 选择 cc-switch provider（输入编号，Enter=不切换）:",
-      ...names.map((name, i) => `  ${i + 1}) ${name}`),
-      "  0) 不切换（使用 claude 默认配置）",
-    ];
-    for (const line of menu) {
-      process.stderr.write(`${line}\n`);
+    const stderr = process.stderr;
+    const stdin = process.stdin;
+    const rowCount = entries.length + 1; // D1: count includes the 不切换 row
+    let index = Math.min(Math.max(Math.trunc(initialIndex), 0), rowCount - 1); // clamp (D4)
+    let settled = false;
+
+    const SKIP_LABEL = "不切换（使用 cc-switch 当前生效配置）";
+    const TITLE =
+      "gcli: 选择 cc-switch provider（↑↓/j/k/C-n/C-p 移动 · Enter 确认 · Esc/C-g 不切换）:";
+
+    const labelOf = (row: number): string => {
+      if (row >= entries.length) return SKIP_LABEL;
+      const entry = entries[row];
+      return entry.quota ? `${entry.name}  ${entry.quota}` : entry.name;
+    };
+    // Selected row: ❯ + full-line inverse video; unselected: two-space indent
+    // (C-P7). \x1b[K clears to EOL so a shorter previous render leaves no
+    // ghosting (残影).
+    const rowText = (row: number): string => {
+      const label = labelOf(row);
+      return row === index
+        ? `\x1b[7m❯ ${label}\x1b[27m\x1b[K`
+        : `  ${label}\x1b[K`;
+    };
+    const drawRows = (): void => {
+      for (let row = 0; row < rowCount; row++) {
+        stderr.write(`${rowText(row)}\n`);
+      }
+    };
+    // In-place redraw: the cursor sits just below the last row after each
+    // draw, so move it back up over every entry row before repainting.
+    const redraw = (): void => {
+      stderr.write(`\x1b[${rowCount}A\r`);
+      drawRows();
+    };
+
+    // Raw-mode lifecycle (C-P3): save → raw → ... EVERY exit path restores.
+    const wasRaw = stdin.isRaw === true;
+    const dataListenersBefore = stdin.listeners("data") as (() => void)[];
+    let onKeypress:
+      | ((str: string, key: KeypressKey | undefined) => void)
+      | undefined;
+    let onGone: () => void = () => {};
+
+    const cleanup = (): void => {
+      if (onKeypress !== undefined) {
+        stdin.removeListener("keypress", onKeypress);
+      }
+      stdin.removeListener("close", onGone);
+      stdin.removeListener("error", onGone);
+      // emitKeypressEvents lazily attaches an internal 'data' listener (via
+      // its newListener hook) when the first keypress listener registers;
+      // remove any data listeners we introduced so stdin is left exactly as
+      // we found it and the spawned backend owns the terminal.
+      for (const listener of stdin.listeners("data") as (() => void)[]) {
+        if (!dataListenersBefore.includes(listener)) {
+          stdin.removeListener("data", listener);
+        }
+      }
+      stdin.pause();
+      if (stdin.isTTY) stdin.setRawMode(wasRaw);
+    };
+    const finish = (outcome: PickerOutcome): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolvePromise(outcome);
+    };
+
+    // Title + hint drawn once; entry rows below it (C-P7).
+    stderr.write(`${TITLE}\n`);
+    drawRows();
+
+    emitKeypressEvents(stdin);
+    onKeypress = (_str: string, key: KeypressKey | undefined): void => {
+      try {
+        if (key?.ctrl && key.name === "c") {
+          // C-P1: restore the terminal FIRST, then take the SIGINT exit code.
+          cleanup();
+          process.exit(130);
+        }
+        if (key === undefined) return;
+        const action = applyPickerKey(key, index, rowCount);
+        if (action.type === "move") {
+          index = action.index;
+          redraw();
+        } else if (action.type === "confirm") {
+          // The last row is the 不切换 row → skip (D4).
+          finish(
+            index < entries.length
+              ? { kind: "select", entry: entries[index] }
+              : { kind: "skip" },
+          );
+        } else if (action.type === "skip") {
+          finish({ kind: "skip" });
+        }
+        // noop → nothing
+      } catch {
+        // Any unexpected failure must never wedge raw mode on: restore and
+        // treat like a skip.
+        finish({ kind: "skip" });
+      }
+    };
+    // Defensive exit paths (EOF after `-p -`, terminal hangup): restore and
+    // skip rather than hang.
+    onGone = (): void => finish({ kind: "skip" });
+    stdin.on("keypress", onKeypress);
+    stdin.once("close", onGone);
+    stdin.once("error", onGone);
+    if (stdin.isTTY) stdin.setRawMode(true);
+  });
+}
+
+/** Minimal shape of a readline keypress event's `key` argument. */
+type KeypressKey = PickerKeyInput;
+
+// ---------------------------------------------------------------------------
+// Last-provider memory (D2) — production deps.readLastProvider/writeLastProvider
+// ---------------------------------------------------------------------------
+
+/**
+ * Production deps.readLastProvider: trimmed first line of LAST_PROVIDER_PATH,
+ * or undefined when missing/empty/unreadable (silent — the memory is a hint,
+ * never a warning).
+ */
+function readLastProviderFromDisk(): Promise<string | undefined> {
+  return new Promise((resolvePromise) => {
+    try {
+      const raw = readFileSync(LAST_PROVIDER_PATH, "utf8");
+      const trimmed = raw.trim();
+      resolvePromise(trimmed ? trimmed : undefined);
+    } catch {
+      resolvePromise(undefined);
     }
-    // EOF (Ctrl-D / closed stdin) resolves skip. Also fires after rl.close()
-    // below — resolving an already-settled promise is a no-op.
-    rl.on("close", () => resolvePromise(undefined));
-    const ask = (): void => {
-      rl.question("provider 编号 [0]: ", (answer) => {
-        const choice = parsePickerChoice(answer, names.length);
-        if (choice.kind === "invalid") {
-          ask();
+  });
+}
+
+/**
+ * Production deps.writeLastProvider: persist the provider name as a single
+ * UTF-8 line, creating the config directory if needed. Best-effort: any
+ * failure is swallowed (memory is an optimization, never an error).
+ */
+function writeLastProviderToDisk(name: string): Promise<void> {
+  return new Promise((resolvePromise) => {
+    try {
+      mkdirSync(dirname(LAST_PROVIDER_PATH), { recursive: true });
+      writeFileSync(LAST_PROVIDER_PATH, `${name}\n`, "utf8");
+    } catch {
+      // best-effort: ignore
+    }
+    resolvePromise();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Quota subtitles (revise-3) — production deps.fetchProviderQuotas
+// ---------------------------------------------------------------------------
+
+type QuotaCacheEntry = { ts: number; ok: boolean; text?: string };
+type QuotaCache = Record<string, QuotaCacheEntry>;
+
+/**
+ * Production deps.fetchProviderQuotas (C-Q5): cache-first with a 60s/15s TTL,
+ * concurrent fetch (2.5s AbortController per request) for stale entries,
+ * best-effort cache rewrite. Failures resolve to no subtitle — the menu must
+ * never block or error on quota problems.
+ */
+async function fetchProviderQuotasHttp(
+  items: {
+    name: string;
+    env: Record<string, string>;
+  }[],
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  let cache: QuotaCache = {};
+  try {
+    const raw = JSON.parse(readFileSync(QUOTA_CACHE_PATH, "utf8"));
+    if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
+      cache = raw as QuotaCache;
+    }
+  } catch {
+    cache = {};
+  }
+  const now = Date.now();
+  const stale: {
+    name: string;
+    req: { kind: "kimi" | "glm"; url: string; authHeader: string };
+  }[] = [];
+  for (const item of items) {
+    const c = cache[item.name];
+    if (
+      c !== undefined &&
+      typeof c.ts === "number" &&
+      now - c.ts < (c.ok ? QUOTA_TTL_OK_MS : QUOTA_TTL_FAIL_MS)
+    ) {
+      if (c.ok === true && typeof c.text === "string" && c.text !== "") {
+        out.set(item.name, c.text);
+      }
+      continue;
+    }
+    const req = buildQuotaRequest(item.env);
+    if (req === null) continue; // no quota API for this provider — skip, don't cache
+    stale.push({ name: item.name, req });
+  }
+  await Promise.all(
+    stale.map(async ({ name, req }) => {
+      const controller = new AbortController();
+      const timer = setTimeout(
+        () => controller.abort(),
+        QUOTA_FETCH_TIMEOUT_MS,
+      );
+      try {
+        const headers: Record<string, string> = {
+          Authorization: req.authHeader,
+          Accept: "application/json",
+        };
+        if (req.kind === "glm") headers["Accept-Language"] = "en-US,en";
+        const resp = await fetch(req.url, {
+          headers,
+          signal: controller.signal,
+        });
+        if (!resp.ok) {
+          cache[name] = { ts: now, ok: false };
           return;
         }
-        rl.close();
-        resolvePromise(
-          choice.kind === "select" ? names[choice.index] : undefined,
-        );
-      });
-    };
-    ask();
-  });
+        const body: unknown = await resp.json();
+        const windows =
+          req.kind === "kimi" ? parseKimiUsages(body) : parseGlmQuota(body);
+        const text = formatQuota(windows, Date.now());
+        if (text !== "") {
+          cache[name] = { ts: now, ok: true, text };
+          out.set(name, text);
+        } else {
+          cache[name] = { ts: now, ok: false };
+        }
+      } catch {
+        cache[name] = { ts: now, ok: false };
+      } finally {
+        clearTimeout(timer);
+      }
+    }),
+  );
+  try {
+    mkdirSync(dirname(QUOTA_CACHE_PATH), { recursive: true });
+    writeFileSync(QUOTA_CACHE_PATH, JSON.stringify(cache), "utf8");
+  } catch {
+    // best-effort: ignore
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -1229,6 +1755,7 @@ agy backend (\`gcli agy ...\` — the subcommand is REQUIRED; bare \`gcli\` is c
 claude backend (default; bare \`gcli ...\` === \`gcli claude ...\`):
   -p, --prompt <text|->   Prompt text, "-" for stdin; omit for interactive TUI
       --provider <name>   cc-switch provider (matched by exact/case/substring)
+      --pick              Force the provider picker menu, even in print mode
       --model <name>      Override ANTHROPIC_MODEL in the provider env
       --cwd <dir>         Working directory (added via claude --add-dir)
       --timeout <ms>      Hard timeout in ms (default 300000, max 1800000)
@@ -1239,11 +1766,24 @@ claude backend (default; bare \`gcli ...\` === \`gcli claude ...\`):
   Notes:
     - --provider switches via \`claude -p ... --settings {'env':{...}}\`; it
       does NOT rewrite ~/.claude/settings.json.
-    - No --provider in a TTY: gcli lists all cc-switch providers as a numbered
-      menu (Enter = 不切换, keep claude's default config). Without a TTY the
-      picker never triggers — no prompt, no cc-switch DB read.
+    - No --provider in a TTY: gcli lists all cc-switch providers (in
+      cc-switch's own DB order) in an arrow-key picker (↑↓/j/k and Emacs
+      C-n/C-p move · Enter 确认 · Esc/C-g = 不切换, keep claude's default
+      config; M-</M-> jump to first/last; ctrl-c exits 130). In print mode
+      (-p) the last confirmed provider is reused silently (one stderr hint
+      line); the menu only pops when nothing valid is remembered, or when
+      --pick is given. Without a TTY the picker never triggers — no prompt,
+      no cc-switch DB read, no memory-file IO.
+    - Menu rows carry a quota subtitle (kimi/glm coding plans): 5h/weekly
+      usage percent plus the next reset as a relative duration (e.g.
+      \`5h:42% wk:17% ↻2h13m\`). Fetched once per menu open, cached 60s in
+      ~/.config/gcli/quota-cache.json; providers without a quota API show
+      no subtitle.
+    - The last picker choice is remembered in ~/.config/gcli/last-provider
+      (best-effort; explicit --provider neither reads nor writes it).
     - --yolo/--sandbox are rejected on the claude backend (default path
-      included); use \`gcli agy\` for them.
+      included); use \`gcli agy\` for them. --pick is claude-only too (agy
+      rejects it) and cannot be combined with --provider.
     - --provider passes the provider token via claude's argv (visible in 'ps');
       cc-switch's mechanism offers no sealed alternative.
 
@@ -1311,6 +1851,16 @@ async function runAgyBackend(
   parsed: ParsedArgs,
   deps: RunDeps,
 ): Promise<RunOutcome> {
+  // --pick is claude-backend-only (cc-switch provider picker); agy has no
+  // provider switching, so reject it like the other unsupported flags.
+  if (parsed.pick) {
+    return {
+      exitCode: 2,
+      stdout: "",
+      stderr: "gcli: agy backend does not support --pick",
+    };
+  }
+
   if (parsed.version) {
     const r = await deps.runAgy(["--version"], VERSION_TIMEOUT_MS);
     const out = (r.stdout || r.stderr).trim();
@@ -1407,6 +1957,26 @@ async function runClaudeBackend(
   parsed: ParsedArgs,
   deps: RunDeps,
 ): Promise<RunOutcome> {
+  // D3 validation order: --pick/--provider mutual exclusion → non-TTY --pick
+  // → the pre-existing yolo/version/TTY-guard sequence.
+  if (parsed.pick && parsed.provider !== undefined) {
+    return {
+      exitCode: 2,
+      stdout: "",
+      stderr: "gcli: --pick cannot be combined with --provider",
+    };
+  }
+  // Placed BEFORE the TTY guard below on purpose: a non-TTY --pick must
+  // report --pick even when -p is missing (which would otherwise produce the
+  // generic "-p is required" error).
+  if (parsed.pick && !deps.isInteractive()) {
+    return {
+      exitCode: 2,
+      stdout: "",
+      stderr: "gcli: --pick requires a TTY",
+    };
+  }
+
   // C8: claude backend rejects agy-only flags.
   if (parsed.yolo || parsed.sandbox) {
     return {
@@ -1494,34 +2064,97 @@ async function runClaudeBackend(
     }
     settingsEnv = resolved.env;
   } else {
-    // Provider picker (C-D2/C-D3): closed trigger set — claude dispatch (we
-    // are here), no --provider, TTY, and past the --version short-circuit.
+    // Picker / memory path (D3 matrix): closed trigger set — claude dispatch
+    // (we are here), no --provider, and past the --version short-circuit.
     // Non-TTY callers (skills/CI/pipes) skip this entirely: zero prompts,
-    // zero cc-switch DB reads.
+    // zero cc-switch DB reads, zero memory-file IO (C-P9).
     if (deps.isInteractive()) {
       const lookup = await deps.readCcSwitchProvider();
       if (!lookup.ok) {
-        // Soft degradation (C-D5): warn and continue without injection.
+        // Soft degradation (C-P10): warn and continue without injection.
         pickerWarning = `gcli: provider picker unavailable: ${lookup.message}`;
       } else if (lookup.providers.length === 0) {
         pickerWarning = "gcli: no cc-switch providers configured";
       } else {
-        const picked = await deps.pickProvider(
-          lookup.providers.map((p) => p.name),
-        );
-        if (picked !== undefined) {
-          // Exact-name lookup (no matchProviderName): the picker returns a
-          // name straight from this list.
-          const target = lookup.providers.find((p) => p.name === picked);
-          if (target === undefined) {
-            pickerWarning = `gcli: provider picker returned unknown name: ${picked}`;
-          } else {
-            const resolved = settingsEnvFromRawProvider(target, parsed.model);
-            if (resolved.kind === "error") {
-              return resolved.outcome;
-            }
-            settingsEnv = resolved.env;
+        // Memory read (D2): TTY claude path, no --provider. Exact-name match
+        // against the current list; mismatch/missing/empty/unreadable is
+        // silently ignored (initialIndex 0, no warning).
+        const remembered = await deps.readLastProvider();
+        // D5 (revise-2): NO sorting — the menu mirrors the cc-switch DB row
+        // order (rowid/insertion order, what the cc-switch UI shows).
+        const ordered = lookup.providers;
+        const memoryIndex =
+          remembered !== undefined
+            ? ordered.findIndex((p) => p.name === remembered)
+            : -1;
+        const memoryValid = memoryIndex >= 0;
+        const printMode = prompt !== undefined;
+        // D3 matrix: TUI → always menu; print + valid memory + no --pick →
+        // silent reuse; print + invalid/absent memory → menu; --pick →
+        // force menu.
+        const showMenu = parsed.pick || !printMode || !memoryValid;
+        if (!showMenu) {
+          // C-P5 silent reuse: inject the remembered provider with no menu
+          // output; a single stderr hint line rides on outcome.stderr (same
+          // mechanism as the v1 pickerWarning). Memory is NOT rewritten.
+          const resolved = settingsEnvFromRawProvider(
+            ordered[memoryIndex],
+            parsed.model,
+          );
+          if (resolved.kind === "error") {
+            return resolved.outcome;
           }
+          settingsEnv = resolved.env;
+          pickerWarning = `gcli: provider=${ordered[memoryIndex].name}（--pick 重选）`;
+        } else {
+          // C-Q4: quota fetch ONLY on the menu path (silent reuse / explicit
+          // --provider / non-TTY never reach here). Extract each provider's
+          // env first (same source as injection); broken configs are skipped.
+          const quotaItems: {
+            name: string;
+            env: Record<string, string>;
+          }[] = [];
+          for (const p of ordered) {
+            const cfgJson =
+              typeof p.settingsConfig === "string"
+                ? p.settingsConfig
+                : JSON.stringify(p.settingsConfig);
+            const envResult = extractProviderEnv(cfgJson);
+            if (!("error" in envResult)) {
+              quotaItems.push({ name: p.name, env: envResult.env });
+            }
+          }
+          const quotaMap = await deps.fetchProviderQuotas(quotaItems);
+          // D5/D6 (revise-3): rows are name + quota subtitle (host is gone);
+          // the remembered row gets a（上次）marker after the subtitle.
+          const entries: PickerEntry[] = ordered.map((p) => {
+            let quota = quotaMap.get(p.name);
+            if (remembered !== undefined && p.name === remembered) {
+              quota = quota !== undefined ? `${quota}（上次）` : "（上次）";
+            }
+            return { name: p.name, quota };
+          });
+          const picked = await deps.pickProvider(
+            entries,
+            memoryValid ? memoryIndex : 0,
+          );
+          if (picked.kind === "select") {
+            // Exact-name lookup (no matchProviderName): the picker returns
+            // an entry straight from this list.
+            const target = ordered.find((p) => p.name === picked.entry.name);
+            if (target === undefined) {
+              pickerWarning = `gcli: provider picker returned unknown name: ${picked.entry.name}`;
+            } else {
+              const resolved = settingsEnvFromRawProvider(target, parsed.model);
+              if (resolved.kind === "error") {
+                return resolved.outcome;
+              }
+              settingsEnv = resolved.env;
+              // D2: write AFTER the picker confirm, BEFORE any spawn.
+              await deps.writeLastProvider(picked.entry.name);
+            }
+          }
+          // skip → keep claude's default config; memory untouched.
         }
       }
     }
@@ -1788,7 +2421,11 @@ async function main(): Promise<void> {
     runClaudeInteractive: (args, cwd) => runClaudeInteractive(args, cwd),
     runAgyInteractive: (args, cwd) => runAgyInteractive(args, cwd),
     isInteractive: () => process.stdin.isTTY === true,
-    pickProvider: (names) => pickProviderInteractive(names),
+    pickProvider: (entries, initialIndex) =>
+      pickProviderInteractive(entries, initialIndex),
+    fetchProviderQuotas: (items) => fetchProviderQuotasHttp(items),
+    readLastProvider: () => readLastProviderFromDisk(),
+    writeLastProvider: (name) => writeLastProviderToDisk(name),
   };
   const r = await run(process.argv.slice(2), deps);
   if (r.stdout) process.stdout.write(`${r.stdout}\n`);

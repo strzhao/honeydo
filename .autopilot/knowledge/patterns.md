@@ -68,3 +68,14 @@
 - 短路 flag 若被 wrapper 自身消费，用 `-- --flag` 透传让它落到后端（经 wrapper 的 passthrough 通道）。
 
 **参考**：gcli QA 谓词 P4（2026-08-30）：`printf '0\n' | script -q /dev/null node dist/cli.js -- --version` 驱动真实 picker 菜单后 spawn `claude --version` 成功（核对锚点：2026-08-30 源码版本）。
+
+<!-- tags: api, quota, runtime-verification, anthropic-compatible, cc-switch -->
+## anthropic 兼容生态辅助 API 的字段类型必须 curl 实测，不可从工具源码推断
+
+**场景**：集成 cc-switch provider 生态的辅助端点（quota/usage 类，如 kimi `/coding/v1/usages`、GLM `/api/monitor/usage/quota/limit`），参考实现是 jq/shell 工具（如 statusline-sage）时。
+
+**教训**：字段名相同 ≠ 字段类型相同。jq 管道只做排序/取值不做类型解析，会掩盖类型差异——GLM 的 `nextResetTime` 是 **epoch-ms 数字**，而同名语义的 kimi `resetTime` 是 ISO 字符串；从 statusline-sage 源码看两者都"像"字符串。解析器按臆断类型写（`typeof === "string"`）会静默丢数据（表现为 UI 子项缺失而非报错）。**集成前用真实 token curl 一次端点**，把响应样例直接写成测试 fixture；解析入口做类型归一化（number|string → 统一形态），而不是拒绝非预期类型。
+
+**证据**：(2026-08-30) gcli quota 副标题首版按 ISO 字符串解析 → pty 实测 glm 两 provider 均无副标题（缓存 ok:false）；curl 探针返回 HTTP 200 且 `nextResetTime: 1788113075877`（数字）→ `toResetIso` 归一化修复后三家 provider 实时数据全渲染。同族前例：cc-switch 存 `ANTHROPIC_MODEL: "k3[1M]"`，claude agent 认、纯 API 不认（见 api 后端条目）。
+
+**参考**：`src/cli.ts` 的 `toResetIso` / `buildQuotaRequest`（核对锚点：2026-08-30 源码版本）。

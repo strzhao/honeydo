@@ -74,9 +74,22 @@ function makeDeps(
       overrides.readCcSwitchProvider ??
       vi.fn(async () => ({ ok: true as const, providers: [K3_RAW] })),
     // C-D3（默认翻转/picker 特性）新增必填接缝；api 路径不触发 picker，默认 skip
+    // （签名按 picker v2 机械适配）
     pickProvider:
       overrides.pickProvider ??
-      vi.fn(async (_names: string[]): Promise<string | undefined> => undefined),
+      vi.fn(
+        async (
+          _entries: { name: string; host?: string }[],
+          _initialIndex: number,
+        ): Promise<{ kind: "skip" }> => ({ kind: "skip" }),
+      ),
+    // picker v2 新增记忆接缝；api 路径不触发，默认无记忆
+    readLastProvider: vi.fn(async (): Promise<string | undefined> => undefined),
+    writeLastProvider: vi.fn(async (): Promise<void> => {}),
+    // picker v3（revise-3 quota）新增必填接缝；api 路径不触发，机械适配
+    fetchProviderQuotas: vi.fn(
+      async (): Promise<Map<string, string>> => new Map(),
+    ),
     runApi:
       overrides.runApi ??
       vi.fn(
