@@ -41,3 +41,30 @@
 **职责切分**：k3 只产「创意方案 + SVG 资产」（45s），工程组装（写完整 Scene TSX + HC 合规）回归调用方编排器（确定性工程，不消耗 k3 创造力）。
 
 **参考**：`src/cli.ts` 的 `runApiBackend` / `buildApiBody` / `resolveApiProviderEnv`；add-hanzi skill `phase-workflow.md` Phase 1.2-1.3。
+
+<!-- tags: cli, tty, interactive, picker, di -->
+## 交互式 CLI wrapper 的 TTY 硬门控（picker/prompt 类交互）
+
+**场景**：CLI wrapper 主要被 skills/CI 非交互调用（stdin 是管道），但要给人工 TTY 使用加交互能力（如编号菜单选择 provider）。任何交互 prompt 若在非 TTY 触发，脚本管道直接挂死。
+
+**做法**：
+- 交互触发用**闭集条件**：`无显式参数 && isInteractive() && 非短路分支（如 --version）`；非 TTY 下零 prompt、零外部读取（DB/网络），行为与无该特性时逐字节一致。
+- 交互 UI 全写 **stderr**，stdout 保持管道纯净（print 模式下调用方只解析 stdout）。
+- 零依赖手写选择器：`node:readline` + `terminal:false`（避开 raw-mode 恢复问题），spawn 子进程前 `rl.close()` 让后端 TUI 干净接管 stdin；无效输入重问、空输入=默认项、EOF=跳过。
+- 降级走软警告（stderr 一行 + exit code 不变）；只有显式参数的失败才硬失败。
+- 输入解析抽成纯函数 + DI 接缝注入交互动作，验收测试全程 fake，无真实 TTY 依赖。
+
+**参考**：`src/cli.ts` 的 `pickProviderInteractive` / `parsePickerChoice` / `runClaudeBackend` picker 分支（核对锚点：2026-08-30 源码版本）。
+
+<!-- tags: testing, tty, pty, qa, macos -->
+## pty 驱动 TTY 交互 CLI 的真实场景验证（零 API 成本）
+
+**场景**：QA Tier 1.5 需验证"仅 TTY 触发"的交互流程（如 picker 菜单），但编排器/CI 无真实终端，且不应为验证付出真实后端调用成本。
+
+**做法**：macOS 用 BSD `script` 分配伪终端：`printf '<输入>\n' | script -q /dev/null <cmd>`——子进程看到 TTY stdin，script 把管道输入转发进 pty，stdout/stderr 合并记录可断言。配合后端自身的快速短路命令（如透传 `--version`）做 spawn 后的断言锚点，整条交互链路验证零 API 成本。
+
+**避坑**：
+- 断言菜单文本时容忍 pty 回显控制符（`^D` 等），匹配关键子串而非整行。
+- 短路 flag 若被 wrapper 自身消费，用 `-- --flag` 透传让它落到后端（经 wrapper 的 passthrough 通道）。
+
+**参考**：gcli QA 谓词 P4（2026-08-30）：`printf '0\n' | script -q /dev/null node dist/cli.js -- --version` 驱动真实 picker 菜单后 spawn `claude --version` 成功（核对锚点：2026-08-30 源码版本）。

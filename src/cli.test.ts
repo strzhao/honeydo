@@ -11,6 +11,7 @@ import {
   type ParseResult,
   parseApiArgs,
   parseCliArgs,
+  parsePickerChoice,
   parseSubcommand,
   truncate,
 } from "./cli.js";
@@ -267,6 +268,41 @@ describe("buildClaudeArgs", () => {
   it("never emits timeout (spawn kill owns it)", () => {
     const args = buildClaudeArgs({ prompt: "hi" });
     expect(args.some((a) => a.includes("timeout"))).toBe(false);
+  });
+});
+
+describe("parsePickerChoice", () => {
+  it("blank input skips (Enter = keep claude default config)", () => {
+    expect(parsePickerChoice("", 3)).toEqual({ kind: "skip" });
+    expect(parsePickerChoice("   ", 3)).toEqual({ kind: "skip" });
+  });
+
+  it("'0' skips (explicit 不切换 entry)", () => {
+    expect(parsePickerChoice("0", 3)).toEqual({ kind: "skip" });
+    expect(parsePickerChoice(" 0 ", 3)).toEqual({ kind: "skip" });
+  });
+
+  it("integer 1..count selects (index-1)", () => {
+    expect(parsePickerChoice("1", 3)).toEqual({ kind: "select", index: 0 });
+    expect(parsePickerChoice("3", 3)).toEqual({ kind: "select", index: 2 });
+    expect(parsePickerChoice(" 2 ", 3)).toEqual({ kind: "select", index: 1 });
+  });
+
+  it("out-of-range numbers are invalid", () => {
+    expect(parsePickerChoice("4", 3)).toEqual({ kind: "invalid" });
+    expect(parsePickerChoice("-1", 3)).toEqual({ kind: "invalid" });
+  });
+
+  it("non-numeric input is invalid", () => {
+    expect(parsePickerChoice("abc", 3)).toEqual({ kind: "invalid" });
+    expect(parsePickerChoice("1.5", 3)).toEqual({ kind: "invalid" });
+    expect(parsePickerChoice("+2", 3)).toEqual({ kind: "invalid" });
+  });
+
+  it("count=0: every number is invalid, skip still works", () => {
+    expect(parsePickerChoice("1", 0)).toEqual({ kind: "invalid" });
+    expect(parsePickerChoice("0", 0)).toEqual({ kind: "skip" });
+    expect(parsePickerChoice("", 0)).toEqual({ kind: "skip" });
   });
 });
 

@@ -1,6 +1,6 @@
 {
   "name": "@stringzhao/gcli",
-  "version": "2.1.0",
+  "version": "3.0.0",
   "description": "gcli — thin CLI wrapper around the agy and claude backends with subcommand routing, cc-switch provider switching, interactive TUI mode, truncation, timeout, and explicit exit codes",
   "type": "module",
   "main": "dist/cli.js",

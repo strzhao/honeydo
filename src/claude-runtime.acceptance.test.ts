@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { CHARACTER_LIMIT, run, truncate } from "./cli.js";
 
 // ============================================================================
-// 契约（DI 接口，蓝队按此实现 run 与 deps）：
+// 契约（DI 接口，蓝队按此实现 run 与 deps）—— 默认翻转覆盖版本：
 //
 //   type RawProvider = { name: string; settingsConfig: unknown };
 //   type ProviderLookup =
@@ -11,6 +11,7 @@ import { CHARACTER_LIMIT, run, truncate } from "./cli.js";
 //   type SpawnResult = { stdout: string; stderr: string; exitCode: number; signal?: string | null; timedOut?: boolean };
 //   type RunDeps = {
 //     readCcSwitchProvider: () => Promise<ProviderLookup>;
+//     pickProvider: (names: string[]) => Promise<string | undefined>;   // C-D3 新增必填
 //     runClaude: (args: string[]) => Promise<SpawnResult>;
 //     runAgy: (args: string[]) => Promise<SpawnResult>;
 //     readStdin: () => Promise<string>;
@@ -18,10 +19,14 @@ import { CHARACTER_LIMIT, run, truncate } from "./cli.js";
 //   type RunResult = { exitCode: number; stdout: string; stderr: string };
 //   function run(argv: string[], deps: RunDeps): Promise<RunResult>;
 //
+// C-D2 run() 分发（默认翻转）：'agy'→agy；undefined/'claude'→**claude**；'api'→api。
 // C2 exit-code 映射：0 成功 / 1 运行错误·超时·空输出 / 2 参数错误（stderr "gcli:" 前缀）。
+// C-D8 既有 claude 契约不回归：--yolo/--sandbox 拒（exit 2，默认路径同）。
+// P3（逐字）：默认路径 --yolo → exit 2，stderr 含
+//   'claude backend does not support --yolo/--sandbox'。
 //
-// 验收覆盖：
-//   ACC-1  无子命令默认 agy
+// 验收覆盖（覆盖版本；凡旧文件编码"默认=agy"的断言已翻转）：
+//   ACC-1  无子命令默认 **claude**（D1 翻转）
 //   ACC-2  `gcli agy` → agy
 //   ACC-6  provider 不存在 → exit 2，stderr 含 "provider not found"
 //   ACC-10 缺 -p / 未知子命令 → exit 2，stderr 非空
@@ -30,14 +35,14 @@ import { CHARACTER_LIMIT, run, truncate } from "./cli.js";
 //   ACC-13 空输出 → exit 1，stderr 含 "no output"
 //   ACC-14 stdout>50000 → 含 "[Truncated"
 //   ACC-15 db 缺失 / sqlite3 未装 → exit 1（非 2），stderr 含诊断
-//   ACC-16 `gcli claude -p -` stdin piped → prompt=stdin 内容
-//   ACC-22 `gcli claude --yolo -p hi` → exit 2，stderr 含 "does not support --yolo"
+//   ACC-16 `gcli claude -p -` / 默认 `gcli -p -` stdin piped → prompt=stdin 内容
+//   ACC-22 `gcli claude --yolo -p hi` / 默认 `gcli --yolo -p hi` → exit 2
 // ============================================================================
 
 // CONTRACT_AMBIGUITY 兜底说明：若蓝队最终未导出 `run`（或签名不同），
 // 本文件红灯失败是预期 —— 届时由蓝队按上述 DI 契约导出 run 并对齐形状。
-// ACC-7 的进程层（不改 ~/.claude/settings.json）由 buildClaudeArgs 纯函数断言
-// 在 claude-args.acceptance.test.ts 已覆盖；run 层不再重复 fs.assertion。
+// picker 行为本身的验收在 provider-picker.acceptance.test.ts；本文件 makeDeps
+// 的 pickProvider 默认 skip（返回 undefined），保证既有 claude 断言不被 picker 污染。
 
 const K3_RAW = {
   name: "Kimi For Coding",
@@ -61,8 +66,10 @@ type SpawnResult = {
 function makeDeps(
   overrides: Partial<{
     readCcSwitchProvider: ReturnType<typeof vi.fn>;
+    pickProvider: ReturnType<typeof vi.fn>;
     runClaude: ReturnType<typeof vi.fn>;
     runAgy: ReturnType<typeof vi.fn>;
+    runApi: ReturnType<typeof vi.fn>;
     readStdin: ReturnType<typeof vi.fn>;
     runClaudeInteractive: ReturnType<typeof vi.fn>;
     runAgyInteractive: ReturnType<typeof vi.fn>;
@@ -73,6 +80,10 @@ function makeDeps(
     readCcSwitchProvider:
       overrides.readCcSwitchProvider ??
       vi.fn(async () => ({ ok: true as const, providers: [K3_RAW] })),
+    // C-D3 新增必填接缝；默认 skip → 不注入 settings
+    pickProvider:
+      overrides.pickProvider ??
+      vi.fn(async (_names: string[]): Promise<string | undefined> => undefined),
     runClaude:
       overrides.runClaude ??
       vi.fn(
@@ -91,6 +102,9 @@ function makeDeps(
           exitCode: 0,
         }),
       ),
+    runApi:
+      overrides.runApi ??
+      vi.fn(async () => ({ exitCode: 0, stdout: "api-ok", stderr: "" })),
     readStdin: overrides.readStdin ?? vi.fn(async () => "default-stdin"),
     runClaudeInteractive:
       overrides.runClaudeInteractive ?? vi.fn(async () => ({ exitCode: 0 })),
@@ -101,16 +115,23 @@ function makeDeps(
   };
 }
 
-describe("run() dispatch // ACC-1/2", () => {
-  it("ACC-1: no subcommand → dispatches to runAgy, NOT runClaude", async () => {
+describe("run() dispatch // C-D2 默认翻转（ACC-1/2）", () => {
+  it("ACC-1 flipped: no subcommand → dispatches to runClaude, NOT runAgy", async () => {
     const deps = makeDeps();
     const r = await run(["-p", "hi"], deps);
-    expect(deps.runAgy).toHaveBeenCalledTimes(1);
-    expect(deps.runClaude).not.toHaveBeenCalled();
+    expect(deps.runClaude).toHaveBeenCalledTimes(1);
+    expect(deps.runAgy).not.toHaveBeenCalled();
     expect(r.exitCode).toBe(0);
   });
 
-  it("ACC-2: explicit 'agy' subcommand → dispatches to runAgy", async () => {
+  it("ACC-1 flipped: empty-prompt-less flag argv 也走 claude（'-p'  Leading flag → undefined 哨兵）", async () => {
+    const deps = makeDeps();
+    await run(["-p", "hi"], deps);
+    expect(deps.runClaude).toHaveBeenCalledTimes(1);
+    expect(deps.runAgy).not.toHaveBeenCalled();
+  });
+
+  it("ACC-2: explicit 'agy' subcommand → dispatches to runAgy, NOT runClaude", async () => {
     const deps = makeDeps();
     const r = await run(["agy", "-p", "hi"], deps);
     expect(deps.runAgy).toHaveBeenCalledTimes(1);
@@ -118,16 +139,26 @@ describe("run() dispatch // ACC-1/2", () => {
     expect(r.exitCode).toBe(0);
   });
 
-  it("ACC-1/2: 'claude' subcommand → dispatches to runClaude, NOT runAgy", async () => {
+  it("ACC-1/2: explicit 'claude' subcommand → dispatches to runClaude, NOT runAgy", async () => {
     const deps = makeDeps();
     const r = await run(["claude", "-p", "hi"], deps);
     expect(deps.runClaude).toHaveBeenCalledTimes(1);
     expect(deps.runAgy).not.toHaveBeenCalled();
     expect(r.exitCode).toBe(0);
   });
+
+  it("C-D2: default 与显式 'claude' 等价 — 两者 runClaude argv 形状一致", async () => {
+    const depsA = makeDeps();
+    const depsB = makeDeps();
+    await run(["-p", "hi"], depsA);
+    await run(["claude", "-p", "hi"], depsB);
+    const argsA = depsA.runClaude.mock.calls[0][0] as string[];
+    const argsB = depsB.runClaude.mock.calls[0][0] as string[];
+    expect(argsA).toEqual(argsB);
+  });
 });
 
-describe("run() provider resolution // ACC-6/15 + ACC-4 injection path", () => {
+describe("run() provider resolution // ACC-6/15 + ACC-4 injection path (unchanged)", () => {
   it("ACC-6: --provider with no match → exit 2, stderr contains 'provider not found'", async () => {
     const deps = makeDeps({
       readCcSwitchProvider: vi.fn(async () => ({
@@ -136,6 +167,14 @@ describe("run() provider resolution // ACC-6/15 + ACC-4 injection path", () => {
       })),
     });
     const r = await run(["claude", "-p", "hi", "--provider", "nope"], deps);
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain("provider not found");
+    expect(deps.runClaude).not.toHaveBeenCalled();
+  });
+
+  it("ACC-6 default-path variant: 无 'claude' 首参 --provider nope → exit 2（默认=claude 同链路）", async () => {
+    const deps = makeDeps();
+    const r = await run(["-p", "hi", "--provider", "nope"], deps);
     expect(r.exitCode).toBe(2);
     expect(r.stderr).toContain("provider not found");
     expect(deps.runClaude).not.toHaveBeenCalled();
@@ -245,7 +284,7 @@ describe("run() provider resolution // ACC-6/15 + ACC-4 injection path", () => {
   });
 });
 
-describe("run() claude runtime errors // ACC-11/12/13/14", () => {
+describe("run() claude runtime errors // ACC-11/12/13/14 (default=claude, unchanged semantics)", () => {
   it("ACC-11: claude exits non-zero → exit 1, stderr contains 'claude failed'", async () => {
     const deps = makeDeps({
       runClaude: vi.fn(
@@ -257,6 +296,21 @@ describe("run() claude runtime errors // ACC-11/12/13/14", () => {
       ),
     });
     const r = await run(["claude", "-p", "hi"], deps);
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("claude failed");
+  });
+
+  it("ACC-11 default-path variant: 无首参时 claude 失败同样 exit 1（默认=claude）", async () => {
+    const deps = makeDeps({
+      runClaude: vi.fn(
+        async (): Promise<SpawnResult> => ({
+          stdout: "",
+          stderr: "api error",
+          exitCode: 1,
+        }),
+      ),
+    });
+    const r = await run(["-p", "hi"], deps);
     expect(r.exitCode).toBe(1);
     expect(r.stderr).toContain("claude failed");
   });
@@ -318,11 +372,11 @@ describe("run() claude runtime errors // ACC-11/12/13/14", () => {
   });
 });
 
-describe("run() argv errors // ACC-10/19/22 + missing-prompt", () => {
-  it("ACC-19: empty argv → default agy dispatch, exit 2 (missing -p), stderr non-empty", async () => {
+describe("run() argv errors // ACC-10/19/22 + P3 default --yolo", () => {
+  it("ACC-19 flipped: empty argv → default claude dispatch, exit 2 (missing -p), stderr non-empty", async () => {
     const deps = makeDeps();
     const r = await run([], deps);
-    // 默认走 agy 分派，但缺 -p 必须参数错误退出
+    // 默认走 claude 分派，但缺 -p（非 TTY）必须参数错误退出
     expect(r.exitCode).toBe(2);
     expect(r.stderr.length).toBeGreaterThan(0);
     expect(deps.runAgy).not.toHaveBeenCalled();
@@ -363,6 +417,28 @@ describe("run() argv errors // ACC-10/19/22 + missing-prompt", () => {
     expect(deps.runClaude).not.toHaveBeenCalled();
   });
 
+  it("P3: 默认路径 '--yolo -p hi'（无子命令）→ exit 2，stderr 逐字含契约文案", async () => {
+    const deps = makeDeps();
+    const r = await run(["--yolo", "-p", "hi"], deps);
+    expect(r.exitCode).toBe(2);
+    // P3 逐字：'claude backend does not support --yolo/--sandbox'
+    expect(r.stderr).toContain(
+      "claude backend does not support --yolo/--sandbox",
+    );
+    expect(deps.runClaude).not.toHaveBeenCalled();
+    expect(deps.runAgy).not.toHaveBeenCalled();
+  });
+
+  it("P3 variant: 默认路径 '--sandbox -p hi' → exit 2，同一逐字契约文案", async () => {
+    const deps = makeDeps();
+    const r = await run(["--sandbox", "-p", "hi"], deps);
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain(
+      "claude backend does not support --yolo/--sandbox",
+    );
+    expect(deps.runClaude).not.toHaveBeenCalled();
+  });
+
   it("ACC-22 variant: 'claude --sandbox -p hi' → exit 2, stderr mentions --sandbox unsupported", async () => {
     const deps = makeDeps();
     const r = await run(["claude", "--sandbox", "-p", "hi"], deps);
@@ -397,7 +473,28 @@ describe("run() stdin piped prompt // ACC-16", () => {
     expect(args[pIdx + 1]).not.toBe("-");
   });
 
-  it("ACC-16 default-agy variant: 'agy -p -' also drains stdin for agy backend", async () => {
+  it("ACC-16 default-claude variant: 'gcli -p -'（无子命令）也 drain stdin → runClaude（默认翻转）", async () => {
+    const runClaude = vi.fn(
+      async (): Promise<SpawnResult> => ({
+        stdout: "ok",
+        stderr: "",
+        exitCode: 0,
+      }),
+    );
+    const deps = makeDeps({
+      runClaude,
+      readStdin: vi.fn(async () => "piped-default-claude"),
+    });
+    const r = await run(["-p", "-"], deps);
+    expect(r.exitCode).toBe(0);
+    expect(deps.readStdin).toHaveBeenCalledTimes(1);
+    expect(deps.runAgy).not.toHaveBeenCalled();
+    const args = runClaude.mock.calls[0][0] as string[];
+    const pIdx = args.indexOf("-p");
+    expect(args[pIdx + 1]).toBe("piped-default-claude");
+  });
+
+  it("ACC-16 agy variant: 'agy -p -' drains stdin for agy backend", async () => {
     const runAgy = vi.fn(
       async (): Promise<SpawnResult> => ({
         stdout: "ok",
@@ -418,16 +515,17 @@ describe("run() stdin piped prompt // ACC-16", () => {
   });
 });
 
-describe("run() interactive mode // INT-1..8 (TTY, no -p)", () => {
+describe("run() interactive mode // INT-1..8 (TTY, no -p) — 默认翻转覆盖", () => {
   const tty = () => true;
 
-  it("INT-1: empty argv + TTY → runAgyInteractive called, no -p, exit 0", async () => {
+  it("INT-1 flipped: empty argv + TTY → runClaudeInteractive called, no -p, exit 0", async () => {
     const deps = makeDeps({ isInteractive: vi.fn(tty) });
     const r = await run([], deps);
-    expect(deps.runAgyInteractive).toHaveBeenCalledTimes(1);
-    expect(deps.runAgy).not.toHaveBeenCalled();
+    expect(deps.runClaudeInteractive).toHaveBeenCalledTimes(1);
+    expect(deps.runAgyInteractive).not.toHaveBeenCalled();
+    expect(deps.runClaude).not.toHaveBeenCalled();
     expect(r.exitCode).toBe(0);
-    const args = deps.runAgyInteractive.mock.calls[0][0] as string[];
+    const args = deps.runClaudeInteractive.mock.calls[0][0] as string[];
     expect(args).not.toContain("-p");
   });
 
@@ -441,10 +539,19 @@ describe("run() interactive mode // INT-1..8 (TTY, no -p)", () => {
     expect(args).not.toContain("-p");
   });
 
-  it("INT-3: 'claude --provider kimi' + TTY → --settings injected with kimi env", async () => {
+  it("INT-1 counterpart: 'agy' + TTY → runAgyInteractive（agy 需显式子命令, C-D7）", async () => {
+    const deps = makeDeps({ isInteractive: vi.fn(tty) });
+    const r = await run(["agy"], deps);
+    expect(deps.runAgyInteractive).toHaveBeenCalledTimes(1);
+    expect(deps.runClaudeInteractive).not.toHaveBeenCalled();
+    expect(r.exitCode).toBe(0);
+  });
+
+  it("INT-3: 'claude --provider kimi' + TTY → --settings injected with kimi env (显式 provider, picker 不介入)", async () => {
     const deps = makeDeps({ isInteractive: vi.fn(tty) });
     const r = await run(["claude", "--provider", "kimi"], deps);
     expect(r.exitCode).toBe(0);
+    expect(deps.pickProvider).not.toHaveBeenCalled();
     expect(deps.runClaudeInteractive).toHaveBeenCalledTimes(1);
     const args = deps.runClaudeInteractive.mock.calls[0][0] as string[];
     expect(args).not.toContain("-p");
@@ -485,6 +592,15 @@ describe("run() interactive mode // INT-1..8 (TTY, no -p)", () => {
     expect(deps.runClaudeInteractive).not.toHaveBeenCalled();
   });
 
+  it("INT-5 default variant: non-TTY + 空 argv → exit 2 (默认 claude 同样守 TTY guard)", async () => {
+    const deps = makeDeps({ isInteractive: vi.fn(() => false) });
+    const r = await run([], deps);
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain("gcli:");
+    expect(deps.runClaudeInteractive).not.toHaveBeenCalled();
+    expect(deps.runAgyInteractive).not.toHaveBeenCalled();
+  });
+
   it("INT-6: 'claude --yolo' + TTY → exit 2 (yolo rejected before interactive)", async () => {
     const deps = makeDeps({ isInteractive: vi.fn(tty) });
     const r = await run(["claude", "--yolo"], deps);
@@ -493,10 +609,24 @@ describe("run() interactive mode // INT-1..8 (TTY, no -p)", () => {
     expect(deps.runClaudeInteractive).not.toHaveBeenCalled();
   });
 
-  it("INT-7: '--version' + TTY → version, not TUI", async () => {
+  it("INT-6 default variant: '--yolo' + TTY（无子命令）→ exit 2，picker 不介入", async () => {
+    const deps = makeDeps({ isInteractive: vi.fn(tty) });
+    const r = await run(["--yolo"], deps);
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain("does not support --yolo");
+    expect(deps.runClaudeInteractive).not.toHaveBeenCalled();
+    expect(deps.pickProvider).not.toHaveBeenCalled();
+  });
+
+  it("INT-7 flipped: '--version' + TTY → version via runClaude (print), not TUI", async () => {
     const deps = makeDeps({ isInteractive: vi.fn(tty) });
     await run(["--version"], deps);
-    expect(deps.runAgy).toHaveBeenCalledWith(["--version"], expect.anything());
+    expect(deps.runClaude).toHaveBeenCalledWith(
+      ["--version"],
+      expect.anything(),
+    );
+    expect(deps.runClaudeInteractive).not.toHaveBeenCalled();
+    expect(deps.runAgy).not.toHaveBeenCalled();
     expect(deps.runAgyInteractive).not.toHaveBeenCalled();
   });
 
@@ -527,6 +657,22 @@ describe("run() interactive mode // INT-1..8 (TTY, no -p)", () => {
     const args = runClaude.mock.calls[0][0] as string[];
     expect(args).toContain("--dangerously-skip-permissions");
     // gcli must NOT inject its own `--` (backend would treat the flag as positional)
+    expect(args.filter((a) => a === "--").length).toBe(0);
+  });
+
+  it("PASSTHROUGH default variant: '-p hi -- --flag'（无子命令）→ runClaude argv contains --flag", async () => {
+    const runClaude = vi.fn(
+      async (): Promise<SpawnResult> => ({
+        stdout: "ok",
+        stderr: "",
+        exitCode: 0,
+      }),
+    );
+    const deps = makeDeps({ runClaude });
+    const r = await run(["-p", "hi", "--", "--verbose"], deps);
+    expect(r.exitCode).toBe(0);
+    const args = runClaude.mock.calls[0][0] as string[];
+    expect(args).toContain("--verbose");
     expect(args.filter((a) => a === "--").length).toBe(0);
   });
 

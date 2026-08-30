@@ -59,6 +59,7 @@ type ApiRequest = {
 function makeDeps(
   overrides: Partial<{
     readCcSwitchProvider: ReturnType<typeof vi.fn>;
+    pickProvider: ReturnType<typeof vi.fn>;
     runApi: ReturnType<typeof vi.fn>;
     runClaude: ReturnType<typeof vi.fn>;
     runAgy: ReturnType<typeof vi.fn>;
@@ -72,6 +73,10 @@ function makeDeps(
     readCcSwitchProvider:
       overrides.readCcSwitchProvider ??
       vi.fn(async () => ({ ok: true as const, providers: [K3_RAW] })),
+    // C-D3（默认翻转/picker 特性）新增必填接缝；api 路径不触发 picker，默认 skip
+    pickProvider:
+      overrides.pickProvider ??
+      vi.fn(async (_names: string[]): Promise<string | undefined> => undefined),
     runApi:
       overrides.runApi ??
       vi.fn(
@@ -154,7 +159,7 @@ describe("parseSubcommand // api 子命令路由", () => {
     if (!("error" in claude)) expect(claude.subcommand).toBe("claude");
   });
 
-  it("api: default agy 路由不受影响（argv[0]='-p' → subcommand=undefined）", () => {
+  it("api: default 路由不受影响（argv[0]='-p' → subcommand=undefined 哨兵；run() 层默认分发 claude —— C-D2）", () => {
     const r = parseSubcommand(["-p", "hi"]);
     expect("error" in r).toBe(false);
     if (!("error" in r)) {

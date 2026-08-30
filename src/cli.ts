@@ -3,15 +3,22 @@
 /**
  * gcli — thin wrapper around the `agy` and `claude` CLI backends.
  *
- * Default backend is agy (formerly gemini); `gcli claude ...` routes to the
- * claude CLI and can switch cc-switch providers inline via
+ * Default backend is claude: bare `gcli ...` is exactly `gcli claude ...`.
+ * `gcli agy ...` routes to the agy CLI (explicit subcommand required); the
+ * claude backend can switch cc-switch providers inline via
  * `claude -p ... --settings`. Adds value over calling the backends directly:
  * prompt via argv or stdin (`-p -`), 50k-char output truncation, a hard
  * timeout (spawn SIGTERM), explicit exit codes, and empty-output detection.
  *
  * The claude backend resolves `--provider <name>` from the cc-switch SQLite
  * DB (read-only) and never rewrites ~/.claude/settings.json — the provider
- * switch happens entirely through claude's own `--settings` merge.
+ * switch happens entirely through claude's own `--settings` merge. In a TTY
+ * without --provider it offers an interactive picker over the cc-switch
+ * provider list (Enter skips); without a TTY the picker never triggers (zero
+ * prompts, zero DB reads) so skills/CI never hang.
+ *
+ * Note: on the default (claude) path --yolo/--sandbox are rejected (exit 2);
+ * agy users must opt in via the explicit `gcli agy` subcommand.
  *
  * Timeout is enforced by spawn SIGTERM (deterministic), not via either
  * backend's own timeout flag.
@@ -21,6 +28,7 @@ import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
@@ -60,6 +68,12 @@ export type MatchOutcome =
 export type ProviderEnvResult =
   | { env: Record<string, string> }
   | { error: string };
+
+/** One parsed picker input line (C-D2). */
+export type PickerChoice =
+  | { kind: "select"; index: number }
+  | { kind: "skip" }
+  | { kind: "invalid" };
 
 /** A cc-switch provider row as exposed to the claude backend. */
 export type RawProvider = { name: string; settingsConfig: unknown };
@@ -120,6 +134,14 @@ export type RunDeps = {
     cwd?: string,
   ) => Promise<InteractiveSpawnResult>;
   isInteractive: () => boolean;
+  /**
+   * TTY-only provider picker (C-D2): present the numbered cc-switch provider
+   * list and resolve the chosen provider name, or undefined when the user
+   * skips (Enter / 0 / EOF). Only ever invoked on the claude path in a TTY
+   * with no --provider — non-interactive callers (skills/CI/pipes) must see
+   * zero prompts and zero extra cc-switch DB reads.
+   */
+  pickProvider: (names: string[]) => Promise<string | undefined>;
 };
 
 export type RunOutcome = { exitCode: number; stdout: string; stderr: string };
@@ -133,10 +155,11 @@ export type RunOutcome = { exitCode: number; stdout: string; stderr: string };
  * - argv[0] === "agy"    → subcommand "agy",    rest = argv.slice(1)
  * - argv[0] === "claude" → subcommand "claude", rest = argv.slice(1)
  * - argv[0] === "api"    → subcommand "api",    rest = argv.slice(1)
- * - argv empty OR argv[0] starts with "-" → subcommand undefined (default agy)
+ * - argv empty OR argv[0] starts with "-" → subcommand undefined (default
+ *   backend: claude)
  * - argv[0] any other non-empty token → error "unknown subcommand: <x>"
  *
- * This keeps `gcli -p claude` (argv[0]="-p") on the default agy path with
+ * This keeps `gcli -p claude` (argv[0]="-p") on the default claude path with
  * prompt="claude" — the subcommand must literally lead.
  */
 export function parseSubcommand(argv: string[]): SubcommandResult {
@@ -267,6 +290,21 @@ export function buildSettingsEnv(
     (firstDefault !== undefined ? env[firstDefault] : undefined);
   env.ANTHROPIC_MODEL = (resolved ?? "") as string;
   return env;
+}
+
+/**
+ * Parse one picker input line (C-D2/D3):
+ * - blank or "0" → skip (keep claude's default config)
+ * - integer 1..count → select that entry (index = n-1)
+ * - anything else → invalid (the caller re-asks)
+ */
+export function parsePickerChoice(line: string, count: number): PickerChoice {
+  const trimmed = line.trim();
+  if (trimmed === "" || trimmed === "0") return { kind: "skip" };
+  if (!/^\d+$/.test(trimmed)) return { kind: "invalid" };
+  const n = Number.parseInt(trimmed, 10);
+  if (n < 1 || n > count) return { kind: "invalid" };
+  return { kind: "select", index: n - 1 };
 }
 
 export interface ClaudeOptions {
@@ -1106,13 +1144,62 @@ function readStdin(): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
+// Provider picker (TTY only) — production deps.pickProvider
+// ---------------------------------------------------------------------------
+
+/**
+ * Production deps.pickProvider: numbered menu on stderr, choice read from
+ * stdin via readline (zero deps — no inquirer/enquirer).
+ *
+ * The menu and prompt go to stderr so print-mode stdout stays pipe-clean.
+ * readline runs with terminal:false (no raw-mode juggling) and is closed
+ * before any backend spawn, so the claude TUI can take stdin over cleanly
+ * afterwards. Invalid input re-asks; blank/"0" → skip (undefined); EOF →
+ * skip; Ctrl-C takes the process-default SIGINT.
+ */
+function pickProviderInteractive(names: string[]): Promise<string | undefined> {
+  return new Promise((resolvePromise) => {
+    const rl = createInterface({
+      input: process.stdin,
+      output: process.stderr,
+      terminal: false,
+    });
+    const menu = [
+      "gcli: 选择 cc-switch provider（输入编号，Enter=不切换）:",
+      ...names.map((name, i) => `  ${i + 1}) ${name}`),
+      "  0) 不切换（使用 claude 默认配置）",
+    ];
+    for (const line of menu) {
+      process.stderr.write(`${line}\n`);
+    }
+    // EOF (Ctrl-D / closed stdin) resolves skip. Also fires after rl.close()
+    // below — resolving an already-settled promise is a no-op.
+    rl.on("close", () => resolvePromise(undefined));
+    const ask = (): void => {
+      rl.question("provider 编号 [0]: ", (answer) => {
+        const choice = parsePickerChoice(answer, names.length);
+        if (choice.kind === "invalid") {
+          ask();
+          return;
+        }
+        rl.close();
+        resolvePromise(
+          choice.kind === "select" ? names[choice.index] : undefined,
+        );
+      });
+    };
+    ask();
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 const HELP = `Usage:
-  gcli [agy] [options] [-- <args>]   wrap the agy CLI (default backend)
-  gcli claude [options] [-- <args>]  wrap the claude CLI via cc-switch providers
-  gcli api [options]                 call an anthropic-compatible messages API
+  gcli [claude] [options] [-- <args>]  wrap the claude CLI (default backend)
+  gcli agy [options] [-- <args>]       wrap the agy CLI (explicit subcommand)
+  gcli api [options]                   call an anthropic-compatible messages API
 
 gcli sits in front of three backends and gives skills a stable entry point:
 50k-char output truncation (agy/claude; api only when non-stream), a hard
@@ -1128,7 +1215,7 @@ verbatim; \`--\` forwards everything after it unconditionally. The api backend
 is STRICT — unknown flags are errors (exit 2), because it builds an HTTP body
 directly with nothing to forward to.
 
-agy backend (default; also reachable as \`gcli agy ...\`):
+agy backend (\`gcli agy ...\` — the subcommand is REQUIRED; bare \`gcli\` is claude):
   -p, --prompt <text|->   Prompt text, "-" for stdin; omit for interactive TUI
       --model <name>      agy model (e.g. gemini-2.5-pro)
       --yolo              Auto-approve tool actions (agy --dangerously-skip-permissions)
@@ -1139,7 +1226,7 @@ agy backend (default; also reachable as \`gcli agy ...\`):
       --help              Show this help
       -- <args...>        Pass remaining args through to agy verbatim
 
-claude backend (\`gcli claude ...\`):
+claude backend (default; bare \`gcli ...\` === \`gcli claude ...\`):
   -p, --prompt <text|->   Prompt text, "-" for stdin; omit for interactive TUI
       --provider <name>   cc-switch provider (matched by exact/case/substring)
       --model <name>      Override ANTHROPIC_MODEL in the provider env
@@ -1152,7 +1239,11 @@ claude backend (\`gcli claude ...\`):
   Notes:
     - --provider switches via \`claude -p ... --settings {'env':{...}}\`; it
       does NOT rewrite ~/.claude/settings.json.
-    - --yolo/--sandbox are rejected on the claude backend.
+    - No --provider in a TTY: gcli lists all cc-switch providers as a numbered
+      menu (Enter = 不切换, keep claude's default config). Without a TTY the
+      picker never triggers — no prompt, no cc-switch DB read.
+    - --yolo/--sandbox are rejected on the claude backend (default path
+      included); use \`gcli agy\` for them.
     - --provider passes the provider token via claude's argv (visible in 'ps');
       cc-switch's mechanism offers no sealed alternative.
 
@@ -1283,6 +1374,35 @@ async function runAgyBackend(
   return mapSpawnResult(result, "agy", parsed.timeoutMs);
 }
 
+/** Outcome of the shared RawProvider → settingsEnv tail. */
+type SettingsEnvResolve =
+  | { kind: "ok"; env: Record<string, string> }
+  | { kind: "error"; outcome: RunOutcome };
+
+/**
+ * Shared tail of the claude provider paths (explicit --provider and the TTY
+ * picker): RawProvider → settingsEnv (C-D4). cc-switch stores
+ * settings_config as a JSON string; a pre-parsed object is accepted too
+ * (defensive). Env-extraction failures map to exit 1, unchanged.
+ */
+function settingsEnvFromRawProvider(
+  target: RawProvider,
+  model: string | undefined,
+): SettingsEnvResolve {
+  const cfgJson =
+    typeof target.settingsConfig === "string"
+      ? target.settingsConfig
+      : JSON.stringify(target.settingsConfig);
+  const envResult = extractProviderEnv(cfgJson);
+  if ("error" in envResult) {
+    return {
+      kind: "error",
+      outcome: { exitCode: 1, stdout: "", stderr: `gcli: ${envResult.error}` },
+    };
+  }
+  return { kind: "ok", env: buildSettingsEnv(envResult.env, model) };
+}
+
 async function runClaudeBackend(
   parsed: ParsedArgs,
   deps: RunDeps,
@@ -1330,6 +1450,7 @@ async function runClaudeBackend(
   }
 
   let settingsEnv: Record<string, string> | undefined;
+  let pickerWarning: string | undefined;
   if (parsed.provider !== undefined) {
     const validated = validateProviderName(parsed.provider);
     if (typeof validated !== "string") {
@@ -1367,22 +1488,60 @@ async function runClaudeBackend(
         stderr: `gcli: provider not found: ${parsed.provider}`,
       };
     }
-    // cc-switch stores settings_config as a JSON string; extractProviderEnv
-    // parses it. Accept a pre-parsed object too (defensive).
-    const cfgJson =
-      typeof target.settingsConfig === "string"
-        ? target.settingsConfig
-        : JSON.stringify(target.settingsConfig);
-    const envResult = extractProviderEnv(cfgJson);
-    if ("error" in envResult) {
-      return { exitCode: 1, stdout: "", stderr: `gcli: ${envResult.error}` };
+    const resolved = settingsEnvFromRawProvider(target, parsed.model);
+    if (resolved.kind === "error") {
+      return resolved.outcome;
     }
-    settingsEnv = buildSettingsEnv(envResult.env, parsed.model);
-  } else if (parsed.model !== undefined) {
-    // No --provider: still honour --model by injecting a minimal env that
-    // overrides ANTHROPIC_MODEL via --settings merge.
-    settingsEnv = { ANTHROPIC_MODEL: parsed.model };
+    settingsEnv = resolved.env;
+  } else {
+    // Provider picker (C-D2/C-D3): closed trigger set — claude dispatch (we
+    // are here), no --provider, TTY, and past the --version short-circuit.
+    // Non-TTY callers (skills/CI/pipes) skip this entirely: zero prompts,
+    // zero cc-switch DB reads.
+    if (deps.isInteractive()) {
+      const lookup = await deps.readCcSwitchProvider();
+      if (!lookup.ok) {
+        // Soft degradation (C-D5): warn and continue without injection.
+        pickerWarning = `gcli: provider picker unavailable: ${lookup.message}`;
+      } else if (lookup.providers.length === 0) {
+        pickerWarning = "gcli: no cc-switch providers configured";
+      } else {
+        const picked = await deps.pickProvider(
+          lookup.providers.map((p) => p.name),
+        );
+        if (picked !== undefined) {
+          // Exact-name lookup (no matchProviderName): the picker returns a
+          // name straight from this list.
+          const target = lookup.providers.find((p) => p.name === picked);
+          if (target === undefined) {
+            pickerWarning = `gcli: provider picker returned unknown name: ${picked}`;
+          } else {
+            const resolved = settingsEnvFromRawProvider(target, parsed.model);
+            if (resolved.kind === "error") {
+              return resolved.outcome;
+            }
+            settingsEnv = resolved.env;
+          }
+        }
+      }
+    }
+    if (settingsEnv === undefined && parsed.model !== undefined) {
+      // No provider injection (no --provider, picker skipped/unavailable):
+      // still honour --model by injecting a minimal env that overrides
+      // ANTHROPIC_MODEL via --settings merge (unchanged behaviour).
+      settingsEnv = { ANTHROPIC_MODEL: parsed.model };
+    }
   }
+
+  // Picker degradation warnings ride along on the outcome's stderr without
+  // changing the exit code (C-D5).
+  const withPickerWarning = (o: RunOutcome): RunOutcome =>
+    pickerWarning === undefined
+      ? o
+      : {
+          ...o,
+          stderr: o.stderr ? `${pickerWarning}\n${o.stderr}` : pickerWarning,
+        };
 
   const cwdAbs = parsed.cwd ? resolve(parsed.cwd) : undefined;
 
@@ -1394,7 +1553,11 @@ async function runClaudeBackend(
       passthrough: parsed.passthrough,
     });
     const r = await deps.runClaudeInteractive(args, cwdAbs);
-    return { exitCode: r.exitCode, stdout: "", stderr: r.spawnError ?? "" };
+    return withPickerWarning({
+      exitCode: r.exitCode,
+      stdout: "",
+      stderr: r.spawnError ?? "",
+    });
   }
 
   const args = buildClaudeArgs({
@@ -1404,7 +1567,7 @@ async function runClaudeBackend(
     passthrough: parsed.passthrough,
   });
   const result = await deps.runClaude(args, parsed.timeoutMs, cwdAbs);
-  return mapSpawnResult(result, "claude", parsed.timeoutMs);
+  return withPickerWarning(mapSpawnResult(result, "claude", parsed.timeoutMs));
 }
 
 // ---------------------------------------------------------------------------
@@ -1607,9 +1770,10 @@ export async function run(argv: string[], deps: RunDeps): Promise<RunOutcome> {
   if (parsed.help) {
     return { exitCode: 0, stdout: HELP, stderr: "" };
   }
-  return sub.subcommand === "claude"
-    ? runClaudeBackend(parsed, deps)
-    : runAgyBackend(parsed, deps);
+  // Default backend is claude (C-D2): bare `gcli` === `gcli claude`.
+  return sub.subcommand === "agy"
+    ? runAgyBackend(parsed, deps)
+    : runClaudeBackend(parsed, deps);
 }
 
 async function main(): Promise<void> {
@@ -1624,6 +1788,7 @@ async function main(): Promise<void> {
     runClaudeInteractive: (args, cwd) => runClaudeInteractive(args, cwd),
     runAgyInteractive: (args, cwd) => runAgyInteractive(args, cwd),
     isInteractive: () => process.stdin.isTTY === true,
+    pickProvider: (names) => pickProviderInteractive(names),
   };
   const r = await run(process.argv.slice(2), deps);
   if (r.stdout) process.stdout.write(`${r.stdout}\n`);
