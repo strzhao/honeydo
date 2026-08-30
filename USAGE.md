@@ -30,6 +30,11 @@ lmedia image gen "午后庭院，小蜜蜂男孩蹲在草地上推红色小汽�
 lmedia image edit "保持参考图角色外观完全一致：他在厨房吃蜂蜜面包" \
   --ref refs/pipi.png -o breakfast.png
 
+# 草稿档（Edit-2511 Lightning 8 步蒸馏 LoRA + 蒸馏调度器，~1/4 耗时；--fast 4 极速）
+# ⚠️ 仅限构图/锚点验证：cfg=1 负向不下发，长 prompt 多角色会丢角色+画风漂（2026-08-29 A/B 实录，勿进出版链）
+lmedia image edit "保持参考图角色外观完全一致：他在厨房吃蜂蜜面包" \
+  --ref refs/pipi.png --fast -o draft.png
+
 # 超分（Real-ESRGAN x2 + Lanczos，秒级）
 lmedia image upscale in.png out.png --size 2730x1535
 
@@ -40,6 +45,13 @@ lmedia video gen "角色轻轻挥手" --first-frame page.png -r 352p -o page-mot
 # LoRA 注册表
 lmedia lora list
 lmedia lora add mimi ./mimi.safetensors --kind character --trigger "mimi_cat 橘猫女孩" --weight 1.0
+
+# 常驻 daemon（模型加载一次，gen/edit/upscale 免每次 ~2min 冷加载；2026-08-29 加入）
+lmedia image serve start --mode edit --wait   # 预加载（不 --wait 立即返回，加载期任务自动排队）
+lmedia image serve status                     # 两模式状态；stop 停止（--mode gen 或缺省全部）
+# 默认无需手动管理：gen/edit 首次调用自动拉起，空闲 30min 自动退出（--idle-timeout 可调）；
+# 跑批免冷加载、`--no-daemon` 强制冷路径排障；一个实例只载一条管线（gen+edit 双驻 ~110GB 超内存，
+# 切换用 `serve start --mode X --swap`）
 
 # 环境自检（换机器/长时间不用后先跑）
 lmedia doctor
@@ -62,26 +74,36 @@ lmedia doctor
 - 模型缓存在系统级 `~/.cache/huggingface`（Qwen-Image-2512 / Qwen-Image-Edit-2511，~150GB，勿删；2509 旧缓存确认不用后可手动删；另有 mmh3turbo-bundles ~33GB）
 - Lightning 蒸馏 LoRA 在栈目录 `loras/`（8 步默认 + 4 步极速，--fast 自动注入）
 - LoRA 注册表 `~/.config/limg/loras.json`：三项字段语义——`kind`（style 画风 / character 角色 / speed 加速）、`trigger`（prompt 自动注入）、`defaultWeight`（`lightning` 旧条目为 mflux 遗留，已废弃）
+- **daemon（常驻推理）**：状态目录 `~/.lmedia/serve/`（`<mode>.sock/.json/.log`）；gen/edit 自动拉起、upscale 只搭便车（daemon 不在直接冷路径，spandrel 秒级）；任务串行（GPU 铁律）；任务中客户端断连则服务端照常算完（产物落盘由调用方兜底）；LoRA 按任务热切换（adapter 缓存上限 4）；快照升级/切 LMEDIA_RUNTIME 后需 `serve stop` 重启才会用新权重
 
-## 绘本插画生产配方（2026-08-27 定稿）
+## 绘本插画生产配方 v3（2026-08-28 验收通过，「淡空平」画风）
 
-**主力 = 参考图编辑路径**（角色保真最强、零训练）：
-```bash
-lmedia image edit "保持参考图中的角色外观完全一致（{角色锚点}）：{场景动作}。
-{背景要素显式枚举：如 草地开满粉色黄色紫色小花、蒲公英散落}。
-画面物体边界纪律：每个物体轮廓清晰独立、边缘干净分明，物体之间边界利落不融合，主体细节丰富。
-{主体细节：如 红色玩具小汽车圆润卡通造型、亮红车身饱满、圆形车头灯像眼睛、黄色轮毂清晰锐利}。
-色彩饱和温暖明亮，主体颜色鲜明，水彩儿童绘本插画风格，纸张质感，角色有落地接触阴影，
-无文字、无汉字、无字母、无数字、无logo、无水印、无标签" \
-  --ref refs/{char}.png --steps 30 --width 2048 --height 1152 --seed N
+**画风语言（对照线上原版逆向出的六要素，逐字写进 prompt）**：
+```
+画风要求：低饱和淡雅色调，颜色含蓄柔和偏灰；大色块平涂，画面扁平如手绘插画，无体积光影；
+角色和物体用深色手绘轮廓线勾边；大面积留白背景，接近纸的本色，背景极度简化，仅保留{场景必要物}；
+只有{主角}有细节，背景没有任何多余细节；阴影极轻极淡，若有若无
+```
+**反 AI 味负向（常备）**：
+```
+写实照片，3D渲染，photorealistic，过度细节，均匀满铺的纹理，全图噪点颗粒，高饱和艳丽的色彩，体积光影，立体感，厚重阴影
 ```
 
-**五条铁律**（全部实测换来的）：
-1. **原生 2048×1152 + 30 步**——1664 生成再超分会导致物体边界混合；2048 原生物体像素 +51%，边界在生成时就画清楚
-2. **背景要素显式枚举**——「留白」与「开满花」不能同写（自相矛盾时模型选空）；要花就写「粉黄紫小花一丛丛+蒲公英」
-3. **色彩锚点必写**——「色彩饱和温暖明亮、主体颜色鲜明」；只写「柔和色调」会被理解成淡
-4. **物体边界纪律段**——「每个物体轮廓清晰独立、边缘干净分明、不融合」单独成句
-5. **风格 LoRA 慎用**——lbwatercolor 的「晕染柔边」会泡软边界降饱和（原版画风本身就是边缘利落色块干净的）。确需浓水彩感时权重 ≤0.5，发布档不加
+**完整调用**（edit 路径，角色保真最强）：
+```bash
+lmedia image edit "保持参考图中的角色外观完全一致（{完整锚点，不能省}）：{场景动作}。
+{画风六要素}。无文字、无汉字、无字母、无数字、无logo、无水印、无标签" \
+  --ref refs/{char}.png --steps 30 --width 2048 --height 1152 --seed N --neg "{反AI味负向}"
+```
+
+**七条铁律**：
+1. **画风 = 淡空平 + 轮廓线**——「色彩饱和温暖明亮/主体细节丰富/纸张质感」是 AI 味三毒，禁写；淡雅/平涂/留白/勾边才是原版语言（08-28 用户验收通过）
+2. **锚点/面部纪律/反写实负向缺一不可**——写实漂移的真实根因是 prompt 薄（A/B 实证：官方 ref + v3 prompt + 负向 = 水彩不漂移，ref 无需替换）
+3. **完整锚点每页全量写**——CFG 生效后 prompt 缺什么漂什么
+4. **原生 2048×1152 + 30 步发布 / 1024×576 + 20 步验收迭代**（低尺寸 5 分钟档，画风方向验证够用）
+5. **背景要素显式枚举**——「留白」与「开满花」不能同写；草地写「一整块柔和绿色色块，不画一根根的草」
+6. **gen 无 ref 时必须卡通化词汇**——Q版圆润头大身小手绘平涂 + 反写实负向（动物写实先验很强）
+7. **风格 LoRA 发布档不加**——lbwatercolor 是无 CFG 时代产物，「淡空平」prompt 已覆盖其价值
 
 **角色一致性优先级**：参考图编辑（`image edit --ref`）> 角色 LoRA > 纯文字锚点
 **LoRA 训练成本结论**（2026-08-27 调研）：本地 47s/step × 1500 = 16-20h/角色不划算；云端 AutoDL 4090 ¥1.88/h + ai-toolkit ≈ **¥4-8/角色**（15 角色 ¥65-150，两三个夜间）。只在「需要脱离参考图的自由生成」时才训。升级候选：Edit-2511（多参考图+身份增强）、DiffSynth Qwen-Image-i2L（单图 1 分钟出 LoRA）
@@ -99,6 +121,11 @@ lmedia image edit "保持参考图中的角色外观完全一致（{角色锚点
 | `--fast --num 2` | ~168s/2 张 | 快速档批量选图 |
 | 参考图编辑 2511 / 20 步 / CFG 4.0（新默认） | ~737s | 官方 40 步配方 1392s，质量优先可上调 |
 | 参考图编辑 `--cfg 1` | ~200s | 旧行为逃生口 |
+| 参考图编辑 `--fast`（Lightning 8 步，2048×1152 四 ref，daemon 热路径） | ~651s | 2026-08-29 A/B 实测；**仅草稿档**（见排障表「Lightning edit 画风漂移」） |
+| 参考图编辑 `--cache`（TeaCache 步缓存，2048×1152 30步 CFG4） | ~40-43min | ❌ 出版不可用：两轮 A/B（0.3 / warmup4+0.3）构图均发散成浆糊，见排障表 |
+| 参考图编辑 refVaeSize=512²（实验开关，edit.py cfg 注入） | ~28min（1678s） | ❌ 出版不可用：参考图 token 减 75% 提速 ~1.7x，但角色身份漂移（蜂妈→人类女孩）+ 构图重掷——参考图分辨率是角色一致性命脉，勿动 |
+| 参考图编辑 20 步 @2048×1152 四 ref | ~48min（2854s） | ⚠️ 比 30 步（同机 pace ~70min）省 ~1.5x，但同 seed 不等价（减步=换调度=重掷构图）；n=1 A/B 未过出版门槛，要采用需多页 gate 评分验证 |
+| 参考图编辑 `--fast --cfg 4` | ~1238s | ❌ 死路勿用：蒸馏模型叠 CFG 冲出分布（半调网点/角色崩坏/长水印） |
 | 超分 | ~5s | |
 | LoRA 训练 768² fp32 | ~47s/step | 角色 1200-1500 步 / 风格 1000 步 |
 | 视频 352p / 5s / 12 步 | ~3-6min（预估*） | MiniMax-H3 mmh3turbo；草稿试错档 |
@@ -115,10 +142,17 @@ lmedia image edit "保持参考图中的角色外观完全一致（{角色锚点
 | hf CLI 直连报 "Distant resource..." 且不想走 proxy | hf_hub 1.28 的 curl_cffi 传输层吃 macOS 系统代理，`unset` 不够：`export no_proxy='*' NO_PROXY='*'` + `HF_ENDPOINT=https://hf-mirror.com`（见 scripts/dl-*.sh） |
 | 进程 0% CPU 卡死 | HF etag 检查挂代理 → `HF_HUB_OFFLINE=1`（CLI 已内置） |
 | 生图不遵循 prompt / 画质发飘 | 2026-08 前的旧版 `guidance_scale` 无效（diffusers 忽略），已修复为 true_cfg_scale + 负向模板；`--fast` 时 cfg=1 属正常（蒸馏） |
+| Lightning edit 画风漂移（马赛克满铺纹理/丢角色/构图不跟 prompt） | 蒸馏路径 cfg=1 负向不下发，长 prompt 多角色遵循度衰减（page-20 A/B 实录）——`edit --fast` 只用于构图/锚点草稿验证，出版必须 30 步 CFG4；**蒸馏 + `--cfg 4` 更糟**（半调网点+水印，分布外），别试 |
+| TeaCache（`--cache`）出版档构图发散成浆糊 | 2048×1152/30步/CFG4/多 ref 配方下两轮 A/B 均失败（阈值 0.3、warmup4+0.3 都救不回；PSNR 9.3）。小尺寸 512² 同机制正常（PSNR 26）——大图上每步轨迹扰动被 CFG renorm 放大累积。**出版勿用**；草稿/低尺寸可玩。实现细节与坑见 `python/teacache.py` 头注 |
+| 蒸馏 LoRA 出图质量比预期差 | 检查是否换了蒸馏调度器（`base_shift=max_shift=ln3`、`shift_terminal=None`）：CLI 的 `--fast` 已自动换（`lightningSched`），手写调用 gen.py/edit.py 时必须显式传 |
 | 生成结束但 python 进程不退、内存不还（后续 GPU 任务被杀） | MPS 退出清理偶发挂死（实测一次：旧 edit.py 打印结果后占 ~60GB 不退）。处置：`pkill -9 -f "lmedia-cli/python/(gen\|edit).py"`；跑批脚本见 `scripts/calib-lib.sh` 的清扫模式 |
 | 训练被 SIGKILL | fp32 全模型 ~112GB 超内存 → 必须预计算 embeddings 补丁（见栈目录 train/）；fp16 在 MPS 是死路（loss=nan + scaler bug） |
 | mflux 挂 LoRA 无效果 | mflux 不吃 diffusers/peft 格式 LoRA（静默失败）→ 用 diffusers 路径（CLI 的 gen 就是；快速档也已迁到 diffusers `--fast`） |
 | 生图变慢 2 倍+ | GPU 被另一个任务占着（训练/并发生图/大文件下载抢盘）——本机 GPU 任务是串行的，别并行 |
+| daemon 行为异常（任务挂起/状态残留） | `lmedia image serve stop && lmedia image serve start --mode X --wait` 重启；现场日志 `tail -50 ~/.lmedia/serve/<mode>.log`；被 `pkill -9` 留下的死 socket 会自愈（下次 start 自动清理重绑） |
+| daemon 报「连接中断（任务结果未知）」 | daemon 在任务中死掉/被 stop——客户端故意不自动重跑（防 40min 任务重复）；产物可能已落盘，重试前先查输出文件 |
+| gen/edit 首次调用突然多等 2 分钟 | 那是 daemon 在自动拉起加载模型（stderr 有提示）；之后同管线任务免加载。不想要 daemon：`--no-daemon` 或 `LMEDIA_NO_DAEMON=1` |
+| 外部脚本的 GPU 占用检查失效（pgrep gen/edit.py 查不到） | daemon 进程名是 `serve.py`，且 busy 才占 GPU——防御检查应改用 `lmedia image serve status`（busy=true 即占用）；走 lmedia CLI 的任务自带 waitGpuIdle 排队，不会抢 |
 | 视频秒退/无产物 | 磁盘空间不足（H3 权重 ~50GB + 峰值内存 31GB 需 swap 余量）→ 清理后重跑；权重下载中断重跑即续传 |
 | 视频 mp4 缺失只有帧/音频 | 系统无 ffmpeg（封装必需）→ `brew install ffmpeg` |
 | 换 prompt 画面几乎不变 | 中文 prompt 太短被 seed 主导 → 写 30-50 字（见下方视频小节） |

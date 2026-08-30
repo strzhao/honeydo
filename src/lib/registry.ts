@@ -46,6 +46,22 @@ function seed(): LoraEntry[] {
       kind: 'speed',
       note: 'LightX2V 8 步蒸馏加速（bf16 配 bf16 base 防 MPS dtype 提升降速；--fast 自动注入；4 步极速版同目录）',
     },
+    {
+      name: 'lightningedit2511',
+      path: path.join(lb, 'loras/Qwen-Image-Edit-2511-Lightning-8steps-V1.0-bf16.safetensors'),
+      trigger: '',
+      defaultWeight: 1.0,
+      kind: 'speed',
+      note: 'LightX2V Edit-2511 8 步蒸馏加速（image edit --fast 自动注入，配套蒸馏调度器）',
+    },
+    {
+      name: 'lightningedit2511x4',
+      path: path.join(lb, 'loras/Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors'),
+      trigger: '',
+      defaultWeight: 1.0,
+      kind: 'speed',
+      note: 'LightX2V Edit-2511 4 步极速档（image edit --fast 4 优先匹配）',
+    },
   ];
 }
 

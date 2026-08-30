@@ -5,12 +5,13 @@ import * as path from 'node:path';
 import { resolveRuntime, resolveVideoRuntime } from '../lib/runtime.js';
 import { loadRegistry } from '../lib/registry.js';
 import { hasCommand } from '../lib/which.js';
+import { pingDaemon, type ServeMode } from '../lib/serve.js';
 
 export function registerDoctor(program: Command): void {
   program
     .command('doctor')
     .description('环境自检：运行时/模型快照/LoRA 文件完整性')
-    .action(() => {
+    .action(async () => {
       // —— [video] 检查独立于图像栈（云端/本地模态互不阻断）——
       const vrt = resolveVideoRuntime();
       const videoChecks: [string, boolean][] = [
@@ -38,6 +39,13 @@ export function registerDoctor(program: Command): void {
       } catch (e) {
         imageOk = false;
         console.error((e as Error).message);
+      }
+      // daemon 是可选加速项，不计入就绪判定（未运行打 · 而非 ✗）
+      for (const m of ['gen', 'edit'] as ServeMode[]) {
+        const st = await pingDaemon(m);
+        console.log(
+          `${st ? '✓' : '·'} [image] daemon ${m}${st ? `: ${st.state}（pid ${st.pid}，jobs ${st.jobs}）` : ': 未运行（可选，lmedia image serve start --mode ' + m + '）'}`
+        );
       }
       for (const [name, ok] of videoChecks) console.log(`${ok ? '✓' : '✗'} ${name}`);
       const videoOk = videoChecks[0][1] && videoChecks[1][1];

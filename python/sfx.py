@@ -26,7 +26,7 @@ PEAK_DB = -6.0
 def stats_db(arr):
     peak = 20 * np.log10(np.abs(arr).max() + 1e-12)
     rms = 20 * np.log10(np.sqrt((arr ** 2).mean()) + 1e-12)
-    return round(peak, 1), round(rms, 1)
+    return round(float(peak), 1), round(float(rms), 1)
 
 
 def probe_dur(path):
