@@ -1,0 +1,43 @@
+{
+  "name": "lmedia-cli",
+  "version": "0.2.0",
+  "description": "本地媒体生产 CLI — 图像/视频（本地推理，零 API 成本）+ LoRA 注册表。Apple Silicon",
+  "type": "module",
+  "bin": {
+    "lmedia": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "python"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsup --dts",
+    "watch": "tsup --dts --watch",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run"
+  },
+  "keywords": [
+    "media-generation",
+    "image-generation",
+    "video-generation",
+    "qwen-image",
+    "mlx",
+    "lora",
+    "cli",
+    "local-ai"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^13.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.11"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
