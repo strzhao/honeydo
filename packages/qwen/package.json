@@ -1,0 +1,36 @@
+{
+  "name": "qwen-cli",
+  "version": "0.1.0",
+  "description": "Qwen API CLI — 封装 Qwen API 为独立命令行工具",
+  "type": "module",
+  "bin": {
+    "qwen": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsup --dts",
+    "watch": "tsup --dts --watch",
+    "dev": "tsx src/index.ts"
+  },
+  "keywords": [
+    "qwen",
+    "cli",
+    "ai",
+    "llm"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^13.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
