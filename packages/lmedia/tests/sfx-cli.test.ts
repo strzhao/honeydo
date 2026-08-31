@@ -7,7 +7,11 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const TSX = path.join(ROOT, 'node_modules', '.bin', 'tsx');
+// monorepo hoist 兼容：tsx 可能被提升到 workspace 根 node_modules
+const TSX = [
+  path.join(ROOT, 'node_modules', '.bin', 'tsx'),
+  path.join(ROOT, '..', '..', 'node_modules', '.bin', 'tsx'),
+].find((p) => fs.existsSync(p)) ?? 'tsx';
 const CLI = path.join(ROOT, 'src', 'index.ts');
 const FFMPEG = 'ffmpeg';
 let dir = '';

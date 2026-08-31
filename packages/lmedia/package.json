@@ -14,7 +14,8 @@
     "build": "rm -rf dist && tsup --dts",
     "watch": "tsup --dts --watch",
     "dev": "tsx src/index.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
   },
   "keywords": [
     "media-generation",
@@ -39,5 +40,11 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/strzhao/honeydo.git",
+    "directory": "packages/lmedia"
   }
 }

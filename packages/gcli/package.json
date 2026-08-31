@@ -11,9 +11,6 @@
     "dist",
     "README.md"
   ],
-  "publishConfig": {
-    "access": "public"
-  },
   "scripts": {
     "start": "node dist/cli.js",
     "dev": "tsx watch src/cli.ts",
@@ -23,7 +20,8 @@
     "test:watch": "vitest",
     "lint": "biome check src",
     "lint:fix": "biome check --write src",
-    "format": "biome format --write src"
+    "format": "biome format --write src",
+    "typecheck": "tsc --noEmit"
   },
   "engines": {
     "node": ">=18"
@@ -35,5 +33,11 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^4.1.0"
+  },
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/strzhao/honeydo.git",
+    "directory": "packages/gcli"
   }
 }

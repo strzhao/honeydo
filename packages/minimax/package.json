@@ -17,7 +17,8 @@
     "start": "node dist/cli.js",
     "dev": "tsx src/cli.ts",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {},
   "devDependencies": {
@@ -33,7 +34,10 @@
     "cli"
   ],
   "license": "MIT",
-  "publishConfig": {
-    "access": "public"
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/strzhao/honeydo.git",
+    "directory": "packages/minimax"
   }
 }

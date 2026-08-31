@@ -12,5 +12,11 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/strzhao/honeydo.git"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "biome check ."
   }
 }

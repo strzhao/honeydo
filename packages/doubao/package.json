@@ -17,7 +17,8 @@
     "start": "node dist/cli.js",
     "dev": "tsx src/cli.ts",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {},
   "devDependencies": {
@@ -37,14 +38,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/strzhao/doubao-image-mcp.git"
+    "url": "git+https://github.com/strzhao/honeydo.git",
+    "directory": "packages/doubao"
   },
   "bugs": {
     "url": "https://github.com/strzhao/doubao-image-mcp/issues"
   },
   "homepage": "https://github.com/strzhao/doubao-image-mcp#readme",
-  "publishConfig": {
-    "access": "public",
-    "registry": "https://registry.npmjs.org/"
-  }
+  "private": true
 }
