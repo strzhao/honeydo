@@ -6,6 +6,7 @@ export const config = {
     maxTokens: 1000,
     visionMaxTokens: 3000,
     temperature: 0.7,
-    timeout: 120_000,
+    // QWEN_TIMEOUT_MS 可覆盖：vision 长输出（-t 10000 实测 90-150s+）会撞默认 120s
+    timeout: Number(process.env.QWEN_TIMEOUT_MS) || 120_000,
   },
 } as const;
