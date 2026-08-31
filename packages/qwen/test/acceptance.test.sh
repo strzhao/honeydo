@@ -25,10 +25,11 @@ find_qwen() {
     echo "qwen"
     return 0
   fi
-  # 常见本地安装路径
+  # 仓内相对路径候选（脚本位于 <pkg>/test/ 下）
+  local pkg_root
+  pkg_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   for candidate in \
-    /Users/stringzhao/workspace/qwen-cli/bin/qwen \
-    /Users/stringzhao/workspace/qwen-cli/qwen \
+    "$pkg_root/dist/index.js" \
     ./bin/qwen \
     ./qwen \
     /usr/local/bin/qwen; do
