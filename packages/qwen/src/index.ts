@@ -17,4 +17,10 @@ registerVision(program);
 registerStatus(program);
 registerModels(program);
 
+// DEPRECATED: `qwen` bin 将迁移至 honeydo（且与阿里官方 qwen CLI 冲突）。
+// 新入口：honeydo vision / honeydo models / honeydo status / honeydo ask --backend local
+process.stderr.write(
+  '[deprecated] `qwen` 命令将迁移至 `honeydo`（hd vision/models/status、hd ask --backend local），请逐步切换\n',
+);
+
 program.parse();

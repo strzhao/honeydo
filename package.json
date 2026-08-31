@@ -3,9 +3,38 @@
   "version": "0.1.0",
   "description": "One CLI for every AI capability — chat, vision, image, video, audio. Built for AI agents.",
   "license": "MIT",
+  "keywords": [
+    "cli",
+    "ai",
+    "llm",
+    "claude",
+    "qwen",
+    "doubao",
+    "minimax",
+    "image-generation",
+    "video-generation",
+    "tts",
+    "ai-agents"
+  ],
   "workspaces": [
     "packages/*"
   ],
+  "bin": {
+    "honeydo": "packages/cli/dist/index.js",
+    "hd": "packages/cli/dist/index.js"
+  },
+  "files": [
+    "packages/cli/dist",
+    "packages/gcli/dist",
+    "packages/qwen/dist",
+    "packages/lmedia/dist",
+    "packages/lmedia/python",
+    "packages/doubao/dist",
+    "packages/minimax/dist"
+  ],
+  "dependencies": {
+    "commander": "^13.1.0"
+  },
   "engines": {
     "node": ">=18"
   },
@@ -13,10 +42,13 @@
     "type": "git",
     "url": "git+https://github.com/strzhao/honeydo.git"
   },
+  "homepage": "https://github.com/strzhao/honeydo#readme",
+  "bugs": "https://github.com/strzhao/honeydo/issues",
   "scripts": {
     "build": "npm run build --workspaces --if-present",
     "test": "npm test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "lint": "biome check ."
+    "lint": "biome check .",
+    "prepack": "npm run build"
   }
 }

@@ -1,0 +1,27 @@
+{
+  "name": "@honeydo/cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "honeydo unified shell — one CLI for every AI capability",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "honeydo": "dist/index.js",
+    "hd": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.5.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/strzhao/honeydo.git",
+    "directory": "packages/cli"
+  }
+}
