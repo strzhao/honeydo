@@ -1,0 +1,16 @@
+{
+  "name": "honeydo",
+  "version": "0.1.0",
+  "description": "One CLI for every AI capability — chat, vision, image, video, audio. Built for AI agents.",
+  "license": "MIT",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/strzhao/honeydo.git"
+  }
+}
