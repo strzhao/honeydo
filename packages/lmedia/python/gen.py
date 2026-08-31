@@ -14,6 +14,7 @@
  *         真实旋钮是 true_cfg_scale，且必须传 negative_prompt 才启用——2026-08 修复。
  """
 import json
+from esrgan_path import resolve_esrgan_path
 import math
 import os
 import sys
@@ -61,7 +62,7 @@ def load_esrgan(path: str | None = None):
     """Real-ESRGAN x2（spandrel，MPS）——懒加载，权重缺文件时抛错（doctor 有检查项）。"""
     from spandrel import ModelLoader
 
-    return ModelLoader().load_from_file(path or "/tmp/RealESRGAN_x2.pth").to("mps").eval()
+    return ModelLoader().load_from_file(path or resolve_esrgan_path()).to("mps").eval()
 
 
 def run(pipe: QwenImagePipeline, cfg: dict, sr=None) -> dict:

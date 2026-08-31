@@ -14,6 +14,7 @@ import argparse
 import contextlib
 import gc
 import json
+from esrgan_path import resolve_esrgan_path
 import os
 import queue
 import re
@@ -204,7 +205,7 @@ def run_job(req: dict) -> dict:
     if kind == "upscale":
         import upscale as U
         global SR
-        path = req.get("model") or "/tmp/RealESRGAN_x2.pth"
+        path = req.get("model") or resolve_esrgan_path()
         if SR is None or SR[0] != path:
             SR = (path, U.load_model(path))
         return U.run(SR[1], req)

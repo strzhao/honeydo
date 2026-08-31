@@ -14,7 +14,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-export const PROJECT_ROOT = '/Users/stringzhao/workspace/lmedia-cli';
+export const PROJECT_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
 export const CLI_ENTRY = path.join(PROJECT_ROOT, 'src', 'index.ts');
 
 /* ------------------------------------------------------------------ */

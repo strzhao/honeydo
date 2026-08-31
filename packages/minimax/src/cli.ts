@@ -3,8 +3,8 @@
 /**
  * minimax — CLI for the MiniMax API.
  *
- * Subcommands (only what little-bee actually uses; the official MCP exposes 10
- * tools but most are unused — add more on demand):
+ * Subcommands (intentionally minimal — the official MCP exposes 10 tools but
+ * its schema costs agent context on every call; add more on demand):
  *   tts <text>        text-to-audio            (POST /v1/t2a_v2)
  *   voice-clone       clone a voice from audio (POST /v1/files/upload + /v1/voice_clone)
  *   voices            list voices as JSON      (POST /v1/get_voice)

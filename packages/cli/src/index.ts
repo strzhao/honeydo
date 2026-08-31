@@ -11,20 +11,20 @@
  *   package.json
  *   packages/<pkg>/dist/<entry>
  */
-import { spawnSync } from 'node:child_process';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { spawnSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)); // packages/cli/dist
 
 /** sibling package entry: gcli/doubao/minimax build to cli.js, qwen/lmedia to index.js */
 const ENTRIES = {
-  gcli: path.resolve(HERE, '../../gcli/dist/cli.js'),
-  qwen: path.resolve(HERE, '../../qwen/dist/index.js'),
-  lmedia: path.resolve(HERE, '../../lmedia/dist/index.js'),
-  doubao: path.resolve(HERE, '../../doubao/dist/cli.js'),
-  minimax: path.resolve(HERE, '../../minimax/dist/cli.js'),
+  gcli: path.resolve(HERE, "../../gcli/dist/cli.js"),
+  qwen: path.resolve(HERE, "../../qwen/dist/index.js"),
+  lmedia: path.resolve(HERE, "../../lmedia/dist/index.js"),
+  doubao: path.resolve(HERE, "../../doubao/dist/cli.js"),
+  minimax: path.resolve(HERE, "../../minimax/dist/cli.js"),
 } as const;
 
 type Pkg = keyof typeof ENTRIES;
@@ -37,9 +37,11 @@ function forward(pkg: Pkg, args: string[]): number {
     );
     return 1;
   }
-  const r = spawnSync(process.execPath, [entry, ...args], { stdio: 'inherit' });
+  const r = spawnSync(process.execPath, [entry, ...args], { stdio: "inherit" });
   if (r.error) {
-    process.stderr.write(`honeydo: failed to launch ${pkg}: ${r.error.message}\n`);
+    process.stderr.write(
+      `honeydo: failed to launch ${pkg}: ${r.error.message}\n`,
+    );
     return 1;
   }
   if (r.signal) {
@@ -50,7 +52,10 @@ function forward(pkg: Pkg, args: string[]): number {
 }
 
 /** pull a `--flag value` / `--flag=value` pair out of argv; returns [value, rest] */
-function takeFlag(argv: string[], flag: string): [string | undefined, string[]] {
+function takeFlag(
+  argv: string[],
+  flag: string,
+): [string | undefined, string[]] {
   const rest: string[] = [];
   let value: string | undefined;
   for (let i = 0; i < argv.length; i++) {
@@ -68,10 +73,12 @@ function takeFlag(argv: string[], flag: string): [string | undefined, string[]] 
 
 function version(): string {
   try {
-    const pkg = JSON.parse(fs.readFileSync(path.resolve(HERE, '../../../package.json'), 'utf-8'));
-    return pkg.version ?? '0.0.0';
+    const pkg = JSON.parse(
+      fs.readFileSync(path.resolve(HERE, "../../../package.json"), "utf-8"),
+    );
+    return pkg.version ?? "0.0.0";
   } catch {
-    return '0.0.0';
+    return "0.0.0";
   }
 }
 
@@ -110,70 +117,74 @@ Docs: https://github.com/strzhao/honeydo
 function route(cmd: string | undefined, rest: string[]): number {
   switch (cmd) {
     case undefined:
-    case 'help':
-    case '--help':
-    case '-h':
+    case "help":
+    case "--help":
+    case "-h":
       process.stdout.write(HELP);
       return cmd === undefined ? 2 : 0;
 
-    case '--version':
-    case '-V':
-    case '-v':
+    case "--version":
+    case "-V":
+    case "-v":
       process.stdout.write(`${version()}\n`);
       return 0;
 
-    case 'ask': {
-      const [backend, args] = takeFlag(rest, '--backend');
-      if (backend === undefined || backend === 'claude') return forward('gcli', args);
-      if (backend === 'agy' || backend === 'api') return forward('gcli', [backend, ...args]);
-      if (backend === 'local') return forward('qwen', ['ask', ...args]);
+    case "ask": {
+      const [backend, args] = takeFlag(rest, "--backend");
+      if (backend === undefined || backend === "claude")
+        return forward("gcli", args);
+      if (backend === "agy" || backend === "api")
+        return forward("gcli", [backend, ...args]);
+      if (backend === "local") return forward("qwen", ["ask", ...args]);
       process.stderr.write(
         `honeydo: unknown --backend "${backend}" (expected claude|agy|api|local)\n`,
       );
       return 2;
     }
 
-    case 'vision':
-      return forward('qwen', ['vision', ...rest]);
-    case 'models':
-      return forward('qwen', ['models', ...rest]);
-    case 'status':
-      return forward('qwen', ['status', ...rest]);
+    case "vision":
+      return forward("qwen", ["vision", ...rest]);
+    case "models":
+      return forward("qwen", ["models", ...rest]);
+    case "status":
+      return forward("qwen", ["status", ...rest]);
 
-    case 'image': {
-      if (rest[0] === 'gen') {
-        const [engine, args] = takeFlag(rest.slice(1), '--engine');
-        if (engine === undefined || engine === 'local')
-          return forward('lmedia', ['image', 'gen', ...args]);
-        if (engine === 'doubao') return forward('doubao', args);
+    case "image": {
+      if (rest[0] === "gen") {
+        const [engine, args] = takeFlag(rest.slice(1), "--engine");
+        if (engine === undefined || engine === "local")
+          return forward("lmedia", ["image", "gen", ...args]);
+        if (engine === "doubao") return forward("doubao", args);
         process.stderr.write(
           `honeydo: unknown --engine "${engine}" (expected local|doubao)\n`,
         );
         return 2;
       }
-      return forward('lmedia', ['image', ...rest]);
+      return forward("lmedia", ["image", ...rest]);
     }
-    case 'video':
-      return forward('lmedia', ['video', ...rest]);
-    case 'sfx':
-      return forward('lmedia', ['sfx', ...rest]);
-    case 'lora':
-      return forward('lmedia', ['lora', ...rest]);
+    case "video":
+      return forward("lmedia", ["video", ...rest]);
+    case "sfx":
+      return forward("lmedia", ["sfx", ...rest]);
+    case "lora":
+      return forward("lmedia", ["lora", ...rest]);
 
-    case 'tts':
-      return forward('minimax', ['tts', ...rest]);
-    case 'voice': {
+    case "tts":
+      return forward("minimax", ["tts", ...rest]);
+    case "voice": {
       const sub = rest[0];
-      if (sub === 'clone') return forward('minimax', ['voice-clone', ...rest.slice(1)]);
-      if (sub === 'list') return forward('minimax', ['voices', ...rest.slice(1)]);
-      process.stderr.write('honeydo: voice expects subcommand clone|list\n');
+      if (sub === "clone")
+        return forward("minimax", ["voice-clone", ...rest.slice(1)]);
+      if (sub === "list")
+        return forward("minimax", ["voices", ...rest.slice(1)]);
+      process.stderr.write("honeydo: voice expects subcommand clone|list\n");
       return 2;
     }
 
-    case 'doubao':
-      return forward('doubao', rest);
-    case 'doctor':
-      return forward('lmedia', ['doctor', ...rest]);
+    case "doubao":
+      return forward("doubao", rest);
+    case "doctor":
+      return forward("lmedia", ["doctor", ...rest]);
 
     default:
       process.stderr.write(`honeydo: unknown command "${cmd}"\n\n${HELP}`);

@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { resolveRuntime, resolveVideoRuntime } from '../lib/runtime.js';
 import { loadRegistry } from '../lib/registry.js';
+import { resolveEsrganPath } from '../lib/esrgan.js';
 import { hasCommand } from '../lib/which.js';
 import { pingDaemon, type ServeMode } from '../lib/serve.js';
 import { sfxDoctorChecks } from './sfx.js';
@@ -30,7 +31,7 @@ export function registerDoctor(program: Command): void {
           ['pythonFast (.venv)', fs.existsSync(rt.pythonFast)],
           ['[image] Qwen-Image-2512 快照', fs.existsSync(rt.snapshot)],
           ['[image] Qwen-Image-Edit-2511 快照', fs.existsSync(rt.snapshotEdit)],
-          ['[image] Real-ESRGAN 权重', fs.existsSync('/tmp/RealESRGAN_x2.pth')],
+          ['[image] Real-ESRGAN 权重', fs.existsSync(resolveEsrganPath())],
         ];
         for (const [name, ok] of checks) console.log(`${ok ? '✓' : '✗'} ${name}`);
         for (const l of loadRegistry()) {

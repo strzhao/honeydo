@@ -3,6 +3,7 @@
  * serve.py 复用：load_model / run（daemon 内懒加载常驻，二次超分秒级）
 """
 import json
+from esrgan_path import resolve_esrgan_path
 import sys
 import time
 
@@ -14,7 +15,7 @@ from spandrel import ModelLoader
 
 def load_model(path: str | None = None):
     device = "mps" if torch.backends.mps.is_available() else "cpu"
-    return ModelLoader().load_from_file(path or "/tmp/RealESRGAN_x2.pth").to(device).eval()
+    return ModelLoader().load_from_file(path or resolve_esrgan_path()).to(device).eval()
 
 
 def run(model, cfg: dict) -> dict:
