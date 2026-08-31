@@ -1,0 +1,39 @@
+{
+  "name": "@stringzhao/gcli",
+  "version": "3.1.0",
+  "description": "gcli — thin CLI wrapper around the agy and claude backends with subcommand routing, cc-switch provider switching, interactive TUI mode, truncation, timeout, and explicit exit codes",
+  "type": "module",
+  "main": "dist/cli.js",
+  "bin": {
+    "gcli": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "start": "node dist/cli.js",
+    "dev": "tsx watch src/cli.ts",
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "biome check src",
+    "lint:fix": "biome check --write src",
+    "format": "biome format --write src"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.8",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.0"
+  }
+}

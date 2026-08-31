@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.js.map
+.env
+
+# autopilot: knowledge/ 共享入库，runtime/ 为本地产物
+.autopilot/runtime/
