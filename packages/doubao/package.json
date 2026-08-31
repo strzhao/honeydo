@@ -1,0 +1,50 @@
+{
+  "name": "@stringzhao/doubao",
+  "version": "1.0.0",
+  "description": "doubao — CLI for generating images via the Doubao (Volces Ark) API",
+  "main": "dist/cli.js",
+  "bin": {
+    "doubao": "dist/cli.js"
+  },
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "start": "node dist/cli.js",
+    "dev": "tsx src/cli.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^4.1.0"
+  },
+  "keywords": [
+    "doubao",
+    "image-generation",
+    "cli",
+    "volces",
+    "ark"
+  ],
+  "author": "strzhao",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/strzhao/doubao-image-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/strzhao/doubao-image-mcp/issues"
+  },
+  "homepage": "https://github.com/strzhao/doubao-image-mcp#readme",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}
