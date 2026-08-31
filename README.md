@@ -1,5 +1,8 @@
 # honeydo
 
+[![npm version](https://img.shields.io/npm/v/honeydo)](https://www.npmjs.com/package/honeydo)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
+
 > Honey, do everything. 🍯
 
 One CLI for every AI capability — **chat, vision, image, video, sound effects, TTS** — cloud and local, built for AI agents.
