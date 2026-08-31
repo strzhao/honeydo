@@ -1,8 +1,0 @@
-staging: /Users/stringzhao/workspace_sync/personal_projects/gcli/.autopilot/runtime/requirements/20260725-我希望扩展当前的-cli/acceptance-staging/subcommand.acceptance.test.ts
-target: /Users/stringzhao/workspace_sync/personal_projects/gcli/src/subcommand.acceptance.test.ts
-staging: /Users/stringzhao/workspace_sync/personal_projects/gcli/.autopilot/runtime/requirements/20260725-我希望扩展当前的-cli/acceptance-staging/provider.acceptance.test.ts
-target: /Users/stringzhao/workspace_sync/personal_projects/gcli/src/provider.acceptance.test.ts
-staging: /Users/stringzhao/workspace_sync/personal_projects/gcli/.autopilot/runtime/requirements/20260725-我希望扩展当前的-cli/acceptance-staging/claude-args.acceptance.test.ts
-target: /Users/stringzhao/workspace_sync/personal_projects/gcli/src/claude-args.acceptance.test.ts
-staging: /Users/stringzhao/workspace_sync/personal_projects/gcli/.autopilot/runtime/requirements/20260725-我希望扩展当前的-cli/acceptance-staging/claude-runtime.acceptance.test.ts
-target: /Users/stringzhao/workspace_sync/personal_projects/gcli/src/claude-runtime.acceptance.test.ts
