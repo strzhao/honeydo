@@ -24,7 +24,7 @@ const DEFAULT_NEG =
 /** --cache [thresh] → teaCache payload（缺省阈值 0.3=mlx-teacache Apple Silicon 标定档；未传 = undefined 关闭） */
 function parseCache(v: string | boolean | undefined): { thresh: number } | undefined {
   if (v === undefined) return undefined;
-  return { thresh: v === true ? 0.3 : parseFloat(v) };
+  return { thresh: v === true ? 0.3 : parseFloat(String(v)) };
 }
 
 /**

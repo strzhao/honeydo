@@ -6,6 +6,7 @@ import { resolveRuntime, resolveVideoRuntime } from '../lib/runtime.js';
 import { loadRegistry } from '../lib/registry.js';
 import { hasCommand } from '../lib/which.js';
 import { pingDaemon, type ServeMode } from '../lib/serve.js';
+import { sfxDoctorChecks } from './sfx.js';
 
 export function registerDoctor(program: Command): void {
   program
@@ -49,8 +50,13 @@ export function registerDoctor(program: Command): void {
       }
       for (const [name, ok] of videoChecks) console.log(`${ok ? '✓' : '✗'} ${name}`);
       const videoOk = videoChecks[0][1] && videoChecks[1][1];
+      // —— [sfx] 检查仅展示（同 video 待遇；sfx 权威自检走 lmedia sfx doctor，独立退出码）——
+      const sfxChecks = sfxDoctorChecks();
+      for (const [name, ok] of sfxChecks) console.log(`${ok ? '✓' : '✗'} ${name}`);
+      const sfxOk = sfxChecks.every(([, ok]) => ok);
       console.log(
-        `\n图像模态${imageOk ? '就绪' : '未就绪'}。视频模态（本地 MiniMax-H3 / mmh3turbo）：${videoOk ? '就绪' : '未就绪（lmedia video setup）'}`
+        `\n图像模态${imageOk ? '就绪' : '未就绪'}。视频模态（本地 MiniMax-H3 / mmh3turbo）：${videoOk ? '就绪' : '未就绪（lmedia video setup）'}。` +
+        `音效模态：${sfxOk ? '就绪' : '未就绪（lmedia sfx doctor 看修复指引）'}`
       );
       if (!imageOk) process.exit(1);
     });

@@ -1,20 +1,57 @@
 # lmedia CLI 使用说明
 
-本地媒体生产 CLI。Apple Silicon 本地推理（Mac Studio M4 Max 128GB），**零 API 成本**，图像/视频双模态。
+本地媒体生产 CLI。Apple Silicon 本地推理（Mac Studio M4 Max 128GB），**零 API 成本**，图像/视频/音效三模态。
 
-> 何时用它：任何「要出图/出视频」的需求——绘本插画、素材图、原型图、角色一致性生产、绘本页微动视频。
+> 何时用它：任何「要出图/出视频/出音效」的需求——绘本插画、素材图、原型图、角色一致性生产、绘本页微动视频、角色签名音/环境音。
 > 边界：**图片理解**用 `qwen` CLI（别搞混）；**云端快速单张**可用 `doubao`；本地批量/一致性/免成本生产用 `lmedia`。
 
 ## 命令速查
 
 ```bash
-# 音效生成（Dasheng-AudioGen 本地，Apache 2.0 零成本；2026-08-27 加入）
-# prompt 必须纯英文场景描述（英文文本编码器，中文会生成人声废片）；内置质量门+自动剪裁
+# ── 音效产线（Dasheng-AudioGen 本地，Apache 2.0 零成本；2026-08-31 从 little-bee 迁移为通用能力）──
+# prompt 必须纯英文场景描述（英文文本编码器，中文会生成人声废片）
+
+# 单条生成（10s → 质量门 → 剪裁 → 段内峰值归一 -6dBFS）
 lmedia sfx gen "A friendly cartoon bear making soft happy grunting sounds, single clean take" -o bear.wav
 lmedia sfx gen "A cute cartoon rabbit squeaking happily" --rolls 4 --keep-rolls -o rabbit.wav   # 4掷筛好+保留全部
 lmedia sfx gen "Calm forest ambience with gentle birds" --full -o forest.wav                    # 环境音：跳过剪裁留 10s
-# 管线：10s 生成 → 质量门(峰值≥-25dBFS+SNR≥20dB，全废自动加掷≤2) → 剪裁(两级静音检测+簇截断→1-3s) → 归一-6dBFS
+
+# 批量生成（清单驱动，模型只加载一次；逐 key 多掷+质量门选优 → <dir>/<key>.best.wav + report.json）
+lmedia sfx batch -m sfx.json -o /tmp/sfx-batch --rolls 3 --keys bear,frog      # --keys 过滤子集；-m - 读 stdin
+# 清单: [{"key":"bear","prompt":"A friendly cartoon bear making soft happy grunting sounds"}]
+# report.json 记录逐候选 {roll,peak,snr,pass,reason} 与 winner{path,score}，可审计选优
+
+# 剪裁 / 重剪（不依赖模型，秒级；产物旁写 .ops.json 记录本次参数）
+lmedia sfx trim bear.wav                        # → bear.trim.wav + bear.short.wav + bear.ops.json
+lmedia sfx trim bear.wav --thresh -45dB         # 静音阈值（默认 -35dB，两级回退 -35→-50→不剪）
+lmedia sfx recut bear.wav --cap 3.0             # 灵敏重剪（-40dB/0.45s 间隙 + 3.5s 硬帽）→ 覆写 bear.short.wav
+
+# 归一（sfx 默认两遍峰值 -6dBFS；ambient 走 loudnorm 两遍；全静音输入透传副本+告警，不产 NaN/削波）
+lmedia sfx normalize bear.wav                          # 原地峰值归一 -6dBFS（|增益|<0.5dB 跳过但仍写副本）
+lmedia sfx normalize ambient/*.wav --loudness -23      # loudnorm I=-23 TP=-2 LRA=7（第二遍 aresample 回原采样率）
+lmedia sfx normalize bear.wav --target -12 --out-dir out/   # 峰值归一到 -12dBFS 并输出到别处
+
+# 量化验收（时长/峰值/均值报表；任一 flag 命中 exit 1，行尾 status=pass|fail 机读）
+lmedia sfx accept /tmp/sfx-batch/*.short.wav --max-dur 4.0 --min-dur 0.4
+
+# A/B 试听页（候选音频拷贝到 ab_files/，html 相对路径引用，浏览器直开零依赖）
+lmedia sfx ab -m groups.json -o ab.html         # groups: [{"name":"bear 新旧对比","candidates":["a.wav","b.wav"]}]
+
+# 音效库（SSOT：~/.config/limg/sfx-library/，清单 index.json + 44.1kHz mono 160k mp3）
+lmedia sfx lib init                                              # 建库根 + 空清单（幂等）
+lmedia sfx lib add bear.best.short.wav --key bear --type sfx --library storybook --tags animal,cute
+lmedia sfx lib add forest.wav --key forest --type ambient --library storybook    # ambient 环境音
+lmedia sfx lib list [--type ambient] [--status ready] [--lib <dir>]
+lmedia sfx lib remove bear                       # 仅删记录不删文件；不存在 exit 1
+lmedia sfx lib verify                            # 对账：文件缺失/时长漂移>0.1s → ✗ + exit 1
+
+# 音效栈自检（venv / 主模型缓存 / 分词器缓存；独立退出码 0/1 + 修复指引）
+lmedia sfx doctor
+lmedia sfx setup                                 # 幂等创建 .venv-audio（uv venv + torch/transformers<5 等）
+
+# 管线：10s 生成 → 质量门(峰值≥-25dBFS+SNR≥20dB，全废自动加掷≤2) → 剪裁(两级静音检测+簇截断→1-3s) → 段内两遍归一-6dBFS
 # venv：栈目录 .venv-audio（transformers<5）；~33s/掷；16kHz mono 是模型天花板（高保真待 Stable Audio 3 接入）
+# 退出码：0 成功 / 1 环境·清单损坏·漂移·验收不过 / 2 参数非法·文件不存在
 ```
 
 ```bash
@@ -74,6 +111,9 @@ lmedia doctor
 - 模型缓存在系统级 `~/.cache/huggingface`（Qwen-Image-2512 / Qwen-Image-Edit-2511，~150GB，勿删；2509 旧缓存确认不用后可手动删；另有 mmh3turbo-bundles ~33GB）
 - Lightning 蒸馏 LoRA 在栈目录 `loras/`（8 步默认 + 4 步极速，--fast 自动注入）
 - LoRA 注册表 `~/.config/limg/loras.json`：三项字段语义——`kind`（style 画风 / character 角色 / speed 加速）、`trigger`（prompt 自动注入）、`defaultWeight`（`lightning` 旧条目为 mflux 遗留，已废弃）
+- **音效库根解析优先级**：`--lib` flag > `LMEDIA_SFX_LIB` env > 默认 `~/.config/limg/sfx-library/`；库根内 `index.json` 是唯一清单（SSOT，snake_case 字段），`sfx/`、`ambient/` 放入库规范产物（44.1kHz mono 160k mp3，ffmpeg 转码，原件保留在用户手中）
+- **音效清单损坏防护**：`index.json` 为空/非法 JSON 时报「清单损坏」exit 1，**绝不静默重建**（与 lora 注册表首跑自动播种不同，防丢账）；批量清单 `-m` 同语义（不存在=2，存在但内容坏=1）
+- **音效 venv**：栈目录 `.venv-audio`（`lmedia sfx setup` 幂等创建）；音效模态自检走 `lmedia sfx doctor`（独立退出码），全局 `doctor` 的 `[sfx]` 段仅展示不参与退出码
 - **daemon（常驻推理）**：状态目录 `~/.lmedia/serve/`（`<mode>.sock/.json/.log`）；gen/edit 自动拉起、upscale 只搭便车（daemon 不在直接冷路径，spandrel 秒级）；任务串行（GPU 铁律）；任务中客户端断连则服务端照常算完（产物落盘由调用方兜底）；LoRA 按任务热切换（adapter 缓存上限 4）；快照升级/切 LMEDIA_RUNTIME 后需 `serve stop` 重启才会用新权重
 
 ## 绘本插画生产配方 v3（2026-08-28 验收通过，「淡空平」画风）
@@ -154,6 +194,13 @@ lmedia image edit "保持参考图中的角色外观完全一致（{完整锚点
 | gen/edit 首次调用突然多等 2 分钟 | 那是 daemon 在自动拉起加载模型（stderr 有提示）；之后同管线任务免加载。不想要 daemon：`--no-daemon` 或 `LMEDIA_NO_DAEMON=1` |
 | 外部脚本的 GPU 占用检查失效（pgrep gen/edit.py 查不到） | daemon 进程名是 `serve.py`，且 busy 才占 GPU——防御检查应改用 `lmedia image serve status`（busy=true 即占用）；走 lmedia CLI 的任务自带 waitGpuIdle 排队，不会抢 |
 | 视频秒退/无产物 | 磁盘空间不足（H3 权重 ~50GB + 峰值内存 31GB 需 swap 余量）→ 清理后重跑；权重下载中断重跑即续传 |
+| `sfx gen/batch` 报「音效 venv 未找到」 | 栈目录缺 `.venv-audio` → `lmedia sfx setup`（或 `lmedia sfx doctor` 看三项缺哪） |
+| `sfx doctor` 报模型/分词器缓存缺失 | `HF_HUB_OFFLINE=0 huggingface-cli download mispeech/Dasheng-AudioGen`（分词器同 repo 名换成 `mispeech/dashengtokenizer`）；HF 缓存路径按 `HF_HUB_CACHE` > `$HF_HOME/hub` > `~/.cache/huggingface/hub` 解析 |
+| `sfx trim` 剪完音量还是不对（整段偏轻） | 旧版整掷峰值归一的错位 bug（2026-08-31 已修）：现在先剪到 tmp 测**段内**峰值再增益；若仍异常用 `lmedia sfx recut <file> --cap 3.5` 重剪（同样走段内归一） |
+| `sfx lib add` 报「已有同内容条目」 | 同 `content_hash` 幂等跳过（exit 0）——换 key 也不会重复记账；要强制换内容先改音频再入库 |
+| `sfx lib verify` 报时长漂移 | 清单记录与实际文件时长差 >0.1s（多半是文件被重编码/覆盖）→ `lib remove <key>` 后重新 `lib add` |
+| `sfx normalize` 输出和输入一样大（没响） | 输入全静音（peak < -60dBFS）→ 跳过增益但写透传副本 + `·` 告警（exit 0），这是防 NaN/削波的保护行为 |
+| `sfx batch` 报「批清单解析失败」 | `-m` 文件存在但为空/非法 JSON（exit 1，不覆写）；文件不存在是 exit 2；key 需 `^[a-z0-9-]+$` 且清单内唯一（违者 exit 2） |
 | 视频 mp4 缺失只有帧/音频 | 系统无 ffmpeg（封装必需）→ `brew install ffmpeg` |
 | 换 prompt 画面几乎不变 | 中文 prompt 太短被 seed 主导 → 写 30-50 字（见下方视频小节） |
 | H3 权重下载报 LocalEntryNotFoundError | huggingface_hub 客户端（1.x/0.x 均中招）与 hf-mirror 的 resolve 重定向不兼容（308 回源 huggingface.co）→ 不要指望 HF_ENDPOINT，用 `lmedia video setup --mirror`（curl 直落盘到 mmh3turbo 认的本地路径，全部本地命中零网络） |

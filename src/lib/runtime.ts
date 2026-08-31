@@ -45,6 +45,18 @@ function rootCandidate(): string {
   return root;
 }
 
+/** CLI 自带 python 驱动目录（<root>/python）。dist 与 tsx 源码两种运行形态都兼容 */
+function pythonDriverDir(): string {
+  const candidates = [
+    path.resolve(HERE, '..', 'python'),      // dist/index.js → <pkg>/python
+    path.resolve(HERE, '..', '..', 'python'), // src/lib/runtime.ts（tsx dev）→ <pkg>/python
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(path.join(c, 'sfx.py'))) return c;
+  }
+  return candidates[0];
+}
+
 export function resolveVideoRuntime(): VideoRuntime {
   const root = rootCandidate();
   return {
@@ -61,8 +73,23 @@ export function resolveAudioRuntime(): AudioRuntime {
   return {
     root,
     pythonAudio: path.join(root, '.venv-audio', 'bin', 'python'),
-    pythonDir: path.resolve(HERE, '..', 'python'),
+    pythonDir: pythonDriverDir(),
   };
+}
+
+/** HF 缓存根：HF_HUB_CACHE > $HF_HOME/hub > ~/.cache/huggingface/hub */
+export function hfHubCache(): string {
+  if (process.env.HF_HUB_CACHE) return process.env.HF_HUB_CACHE;
+  if (process.env.HF_HOME) return path.join(process.env.HF_HOME, 'hub');
+  return path.join(os.homedir(), '.cache', 'huggingface', 'hub');
+}
+
+/** repo 在 HF 缓存中的快照目录；未下载/快照为空返回 null（doctor 自检用） */
+export function hfSnapshot(repo: string): string | null {
+  const dir = path.join(hfHubCache(), `models--${repo.replace('/', '--')}`, 'snapshots');
+  if (!fs.existsSync(dir)) return null;
+  const snaps = fs.readdirSync(dir).filter((s) => !s.startsWith('.'));
+  return snaps.length ? path.join(dir, snaps[0]) : null;
 }
 
 export function resolveRuntime(): Runtime {
@@ -94,6 +121,6 @@ export function resolveRuntime(): Runtime {
     pythonFast: path.join(root, '.venv', 'bin', 'python'),
     snapshot: snapOf('Qwen/Qwen-Image-2512'),
     snapshotEdit: snapOf('Qwen/Qwen-Image-Edit-2511'),
-    pythonDir: path.resolve(HERE, '..', 'python'),
+    pythonDir: pythonDriverDir(),
   };
 }
