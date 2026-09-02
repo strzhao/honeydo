@@ -18,6 +18,8 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      # node 22 自带 npm 10.x，OIDC trusted publishing 需 npm >= 11.5.1（否则 ENEEDAUTH）
+      - run: npm install -g npm@^11
       - run: npm ci
       - name: install ffmpeg（lmedia 测试硬依赖）
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
