@@ -21,6 +21,14 @@ jobs:
       - run: npm ci
       - name: install ffmpeg（lmedia 测试硬依赖）
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      # lmedia sfx 的 DSP 用例（trim/normalize/accept）走 .venv-audio + python/sfx.py，
+      # 只需 numpy+soundfile；torch/权重类用例自带缺失守卫，无需真装
+      - name: setup lmedia DSP venv（numpy+soundfile）
+        run: |
+          sudo mkdir -p /opt/lmedia-rt && sudo chown "$USER" /opt/lmedia-rt
+          python3 -m venv /opt/lmedia-rt/.venv-audio
+          /opt/lmedia-rt/.venv-audio/bin/pip install -q numpy soundfile
+          echo "LMEDIA_RUNTIME=/opt/lmedia-rt" >> "$GITHUB_ENV"
       - run: npm run typecheck
       - run: npm test
 
