@@ -6,18 +6,35 @@ import {
   buildApiBody,
   buildApiEndpoint,
   buildClaudeArgs,
+  buildCronRepinPlan,
   buildQuotaRequest,
   CHARACTER_LIMIT,
+  deriveHermesId,
+  deriveKeyEnv,
+  editHermesConfig,
   extractNonStreamText,
   extractTextDelta,
   formatQuota,
+  HERMES_PROVIDER_SEEDS,
+  type HermesConfigEdit,
+  type HermesProviderRegistry,
+  type HermesStateFile,
+  type ParseHermesResult,
   type ParseResult,
   parseApiArgs,
   parseCliArgs,
   parseGlmQuota,
+  parseHermesArgs,
+  parseHermesConfig,
+  parseHermesRegistry,
+  parseHermesStateFile,
   parseKimiUsages,
   parseSubcommand,
+  serializeHermesRegistry,
+  serializeHermesStateFile,
+  stripContextSuffix,
   truncate,
+  upsertEnvLines,
 } from "./cli.js";
 
 function ok(r: ParseResult) {
@@ -732,5 +749,531 @@ describe("extractNonStreamText", () => {
     expect(extractNonStreamText({})).toBe("");
     expect(extractNonStreamText({ content: "nope" })).toBe("");
     expect(extractNonStreamText(null)).toBe("");
+  });
+});
+
+// ===========================================================================
+// hermes 子命令 — 纯函数层单测（TDD RED → GREEN）
+// ===========================================================================
+
+describe("stripContextSuffix", () => {
+  it("strips a trailing [1M] context marker", () => {
+    expect(stripContextSuffix("k3[1M]")).toBe("k3");
+  });
+
+  it("strips any trailing bracket suffix", () => {
+    expect(stripContextSuffix("glm-5.3-flash[1M]")).toBe("glm-5.3-flash");
+    expect(stripContextSuffix("x[128k]")).toBe("x");
+  });
+
+  it("leaves plain model names unchanged", () => {
+    expect(stripContextSuffix("k3")).toBe("k3");
+    expect(stripContextSuffix("glm-5.3-flash")).toBe("glm-5.3-flash");
+  });
+
+  it("only strips a suffix at the very end", () => {
+    expect(stripContextSuffix("a[b]c")).toBe("a[b]c");
+  });
+
+  it("handles empty string", () => {
+    expect(stripContextSuffix("")).toBe("");
+  });
+});
+
+describe("parseHermesArgs", () => {
+  function okHermes(r: ParseHermesResult) {
+    if ("error" in r) throw new Error(`unexpected parse error: ${r.error}`);
+    return r;
+  }
+
+  it("parses a bare provider positional with defaults", () => {
+    const r = okHermes(parseHermesArgs(["kimi"]));
+    expect(r.provider).toBe("kimi");
+    expect(r.model).toBeUndefined();
+    expect(r.dryRun).toBe(false);
+    expect(r.verify).toBe(true);
+    expect(r.keepOnFail).toBe(false);
+    expect(r.help).toBe(false);
+  });
+
+  it("parses all flags", () => {
+    const r = okHermes(
+      parseHermesArgs([
+        "kimi",
+        "--model",
+        "k3",
+        "--dry-run",
+        "--no-verify",
+        "--keep-on-fail",
+      ]),
+    );
+    expect(r.provider).toBe("kimi");
+    expect(r.model).toBe("k3");
+    expect(r.dryRun).toBe(true);
+    expect(r.verify).toBe(false);
+    expect(r.keepOnFail).toBe(true);
+  });
+
+  it("captures reserved words as provider positionals (backend dispatches)", () => {
+    expect(okHermes(parseHermesArgs(["status"])).provider).toBe("status");
+    expect(okHermes(parseHermesArgs(["rollback"])).provider).toBe("rollback");
+  });
+
+  it("empty argv → provider undefined", () => {
+    const r = okHermes(parseHermesArgs([]));
+    expect(r.provider).toBeUndefined();
+  });
+
+  it("--help sets help", () => {
+    expect(okHermes(parseHermesArgs(["--help"])).help).toBe(true);
+  });
+
+  it("rejects a second positional (strict)", () => {
+    const r = parseHermesArgs(["a", "b"]);
+    expect("error" in r).toBe(true);
+  });
+
+  it("rejects unknown flags (strict, exit-2 class)", () => {
+    const r = parseHermesArgs(["kimi", "--bogus"]);
+    expect("error" in r).toBe(true);
+  });
+
+  it("rejects --model without a value", () => {
+    const r = parseHermesArgs(["kimi", "--model"]);
+    expect("error" in r).toBe(true);
+  });
+});
+
+describe("deriveHermesId / deriveKeyEnv", () => {
+  it("derives a slug id from a cc-switch display name", () => {
+    expect(deriveHermesId("Kimi For Coding")).toBe("kimi-for-coding");
+    // 推导结果是机械折叠；"glm flash lastest" 靠内置 seed 映射到 glm-flash
+    expect(deriveHermesId("glm flash lastest")).toBe("glm-flash-lastest");
+    expect(deriveHermesId("PackyCode-claude official")).toBe(
+      "packycode-claude-official",
+    );
+  });
+
+  it("folds non-alphanumeric runs and trims dashes", () => {
+    expect(deriveHermesId("  --Weird__Name--  ")).toBe("weird-name");
+  });
+
+  it("derives the env key from the id", () => {
+    expect(deriveKeyEnv("kimi-coding")).toBe("KIMI_CODING_API_KEY");
+    expect(deriveKeyEnv("glm-flash")).toBe("GLM_FLASH_API_KEY");
+  });
+});
+
+// 脱敏骨架 fixture：结构 1:1 复刻真实 ~/.hermes/config.yaml（顶层 model 段
+// 恰 3 键、providers 为最后顶层段、条目 2 空格 id + 4 空格字段），值全部虚构。
+const HERMES_CONFIG_FIXTURE = `model:
+  default: k3
+  provider: kimi-coding
+  base_url: https://api.kimi.com/coding/
+fallback_providers: []
+agent:
+  max_turns: 90
+  personalities:
+    helpful: You are a helpful, friendly AI assistant.
+mcp_servers: {}
+providers:
+  glm-flash:
+    name: GLM Flash
+    base_url: https://open.bigmodel.cn/api/anthropic
+    transport: anthropic_messages
+    key_env: BIGMODEL_API_KEY
+    default_model: glm-5.3-flash
+  kimi-coding:
+    name: Kimi Coding Plan
+    base_url: https://api.kimi.com/coding/
+    transport: anthropic_messages
+    key_env: KIMI_CODING_API_KEY
+    default_model: k3
+`;
+
+const EDIT_TO_GLM: HermesConfigEdit = {
+  model: {
+    default: "glm-5.3-flash",
+    provider: "glm-flash",
+    base_url: "https://open.bigmodel.cn/api/anthropic",
+  },
+  provider: {
+    id: "glm-flash",
+    name: "GLM Flash",
+    base_url: "https://open.bigmodel.cn/api/anthropic",
+    transport: "anthropic_messages",
+    key_env: "BIGMODEL_API_KEY",
+    default_model: "glm-5.3-flash",
+  },
+};
+
+function editOk(r: { text: string } | { error: string }): string {
+  if ("error" in r) throw new Error(`unexpected edit error: ${r.error}`);
+  return r.text;
+}
+
+describe("editHermesConfig", () => {
+  it("replaces the three model-section keys", () => {
+    const out = editOk(editHermesConfig(HERMES_CONFIG_FIXTURE, EDIT_TO_GLM));
+    expect(out).toContain("  default: glm-5.3-flash\n");
+    expect(out).toContain("  provider: glm-flash\n");
+    expect(out).toContain(
+      "  base_url: https://open.bigmodel.cn/api/anthropic\n",
+    );
+    expect(out).not.toContain("  default: k3\n");
+  });
+
+  it("inserts a missing model key at the end of the model section", () => {
+    const noBaseUrl = HERMES_CONFIG_FIXTURE.replace(
+      "  base_url: https://api.kimi.com/coding/\n",
+      "",
+    );
+    const out = editOk(editHermesConfig(noBaseUrl, EDIT_TO_GLM));
+    const modelBlock = out.slice(
+      out.indexOf("model:\n"),
+      out.indexOf("fallback_providers:"),
+    );
+    expect(modelBlock).toContain(
+      "  base_url: https://open.bigmodel.cn/api/anthropic\n",
+    );
+  });
+
+  it("upserts fields of an existing providers entry", () => {
+    const edit: HermesConfigEdit = {
+      ...EDIT_TO_GLM,
+      provider: { ...EDIT_TO_GLM.provider, default_model: "glm-5.4-flash" },
+    };
+    const out = editOk(editHermesConfig(HERMES_CONFIG_FIXTURE, edit));
+    expect(out).toContain("    default_model: glm-5.4-flash\n");
+    expect(out).not.toContain("    default_model: glm-5.3-flash\n");
+  });
+
+  it("appends a missing field to an existing entry block", () => {
+    const noTransport = HERMES_CONFIG_FIXTURE.replace(
+      "    transport: anthropic_messages\n    key_env: BIGMODEL_API_KEY\n",
+      "    key_env: BIGMODEL_API_KEY\n",
+    );
+    const out = editOk(editHermesConfig(noTransport, EDIT_TO_GLM));
+    const glmBlock = out.slice(
+      out.indexOf("  glm-flash:\n"),
+      out.indexOf("  kimi-coding:\n"),
+    );
+    expect(glmBlock).toContain("    transport: anthropic_messages\n");
+  });
+
+  it("appends a brand-new provider entry at the end of the providers section", () => {
+    const edit: HermesConfigEdit = {
+      model: {
+        default: "deepseek-v4-flash",
+        provider: "deepseek-flash",
+        base_url: "https://api.deepseek.com/anthropic",
+      },
+      provider: {
+        id: "deepseek-flash",
+        name: "DeepSeek Flash",
+        base_url: "https://api.deepseek.com/anthropic",
+        transport: "anthropic_messages",
+        key_env: "DEEPSEEK_API_KEY",
+        default_model: "deepseek-v4-flash",
+      },
+    };
+    const out = editOk(editHermesConfig(HERMES_CONFIG_FIXTURE, edit));
+    expect(out).toContain("  deepseek-flash:\n");
+    expect(out.indexOf("  deepseek-flash:\n")).toBeGreaterThan(
+      out.indexOf("  kimi-coding:\n"),
+    );
+    const block = out.slice(out.indexOf("  deepseek-flash:\n"));
+    // 含空格的标量按设计 quoting 规则走单引号
+    expect(block).toContain("    name: 'DeepSeek Flash'\n");
+    expect(block).toContain("    key_env: DEEPSEEK_API_KEY\n");
+    expect(block).toContain("    default_model: deepseek-v4-flash\n");
+  });
+
+  it("quotes scalars with unsafe characters (single-quote + '' escape)", () => {
+    const edit: HermesConfigEdit = {
+      ...EDIT_TO_GLM,
+      provider: { ...EDIT_TO_GLM.provider, name: "It's GLM, Flash" },
+    };
+    const out = editOk(editHermesConfig(HERMES_CONFIG_FIXTURE, edit));
+    expect(out).toContain("    name: 'It''s GLM, Flash'\n");
+  });
+
+  it("keeps safe scalars bare", () => {
+    const out = editOk(editHermesConfig(HERMES_CONFIG_FIXTURE, EDIT_TO_GLM));
+    expect(out).toContain("    transport: anthropic_messages\n");
+    expect(out).not.toContain("'anthropic_messages'");
+  });
+
+  it("returns {error} when the model: section is missing", () => {
+    const noModel = HERMES_CONFIG_FIXTURE.replace(/^model:\n( {2}.*\n)+/m, "");
+    const r = editHermesConfig(noModel, EDIT_TO_GLM);
+    expect("error" in r).toBe(true);
+  });
+
+  it("returns {error} when the providers: section is missing", () => {
+    const noProviders = HERMES_CONFIG_FIXTURE.slice(
+      0,
+      HERMES_CONFIG_FIXTURE.indexOf("providers:"),
+    );
+    const r = editHermesConfig(noProviders, EDIT_TO_GLM);
+    expect("error" in r).toBe(true);
+  });
+
+  it("returns {error} on unexpected nesting inside the model section", () => {
+    const nested = HERMES_CONFIG_FIXTURE.replace(
+      "  provider: kimi-coding\n",
+      "  provider: kimi-coding\n    deep: true\n",
+    );
+    const r = editHermesConfig(nested, EDIT_TO_GLM);
+    expect("error" in r).toBe(true);
+  });
+
+  it("returns {error} on unexpected nesting inside a providers entry", () => {
+    const nested = HERMES_CONFIG_FIXTURE.replace(
+      "    key_env: BIGMODEL_API_KEY\n",
+      "    key_env:\n      nested: true\n",
+    );
+    const r = editHermesConfig(nested, EDIT_TO_GLM);
+    expect("error" in r).toBe(true);
+  });
+
+  it("is idempotent: edit(edit(x)) === edit(x)", () => {
+    const once = editOk(editHermesConfig(HERMES_CONFIG_FIXTURE, EDIT_TO_GLM));
+    const twice = editOk(editHermesConfig(once, EDIT_TO_GLM));
+    expect(twice).toBe(once);
+  });
+
+  it("leaves unrelated sections byte-identical", () => {
+    const out = editOk(editHermesConfig(HERMES_CONFIG_FIXTURE, EDIT_TO_GLM));
+    const agentBlock = (t: string) =>
+      t.slice(t.indexOf("agent:\n"), t.indexOf("mcp_servers:"));
+    expect(agentBlock(out)).toBe(agentBlock(HERMES_CONFIG_FIXTURE));
+  });
+
+  it("applying the current config's own values reaches a fixed point (no further drift)", () => {
+    const identity: HermesConfigEdit = {
+      model: {
+        default: "k3",
+        provider: "kimi-coding",
+        base_url: "https://api.kimi.com/coding/",
+      },
+      provider: {
+        id: "kimi-coding",
+        name: "Kimi Coding Plan",
+        base_url: "https://api.kimi.com/coding/",
+        transport: "anthropic_messages",
+        key_env: "KIMI_CODING_API_KEY",
+        default_model: "k3",
+      },
+    };
+    // 第一次应用只会把含空格的 name 重 quoting（设计 quoting 规则）；
+    // 其余逐字节不变
+    const once = editOk(editHermesConfig(HERMES_CONFIG_FIXTURE, identity));
+    expect(once).toContain("    name: 'Kimi Coding Plan'\n");
+    expect(
+      once.replace(
+        "    name: 'Kimi Coding Plan'\n",
+        "    name: Kimi Coding Plan\n",
+      ),
+    ).toBe(HERMES_CONFIG_FIXTURE);
+    // 稳态后再切同 provider 零漂移（契约：不产生配置漂移）
+    expect(editOk(editHermesConfig(once, identity))).toBe(once);
+  });
+});
+
+describe("parseHermesConfig", () => {
+  it("reads the model section and provider ids", () => {
+    const r = parseHermesConfig(HERMES_CONFIG_FIXTURE);
+    if ("error" in r) throw new Error(`unexpected: ${r.error}`);
+    expect(r.info.model).toEqual({
+      default: "k3",
+      provider: "kimi-coding",
+      base_url: "https://api.kimi.com/coding/",
+    });
+    expect(r.info.providerIds).toEqual(["glm-flash", "kimi-coding"]);
+  });
+
+  it("returns {error} when the model: section is missing", () => {
+    const r = parseHermesConfig("agent:\n  max_turns: 90\n");
+    expect("error" in r).toBe(true);
+  });
+});
+
+describe("upsertEnvLines", () => {
+  const ENV_FIXTURE =
+    "# top comment\nFOO_API_KEY=old-value\n\nBAR_API_KEY=keep\n#FOO_API_KEY=commented-out\n";
+
+  it("replaces an existing key, preserving comments and blank lines", () => {
+    const out = upsertEnvLines(ENV_FIXTURE, "FOO_API_KEY", "new-value");
+    expect(out).toContain("FOO_API_KEY=new-value\n");
+    expect(out).not.toContain("FOO_API_KEY=old-value");
+    expect(out).toContain("# top comment\n");
+    expect(out).toContain("\n\nBAR_API_KEY=keep\n");
+    // commented-out occurrences are NOT treated as the key
+    expect(out).toContain("#FOO_API_KEY=commented-out\n");
+  });
+
+  it("appends a missing key at the end (before the trailing newline)", () => {
+    const out = upsertEnvLines(ENV_FIXTURE, "NEW_KEY", "v1");
+    expect(out.endsWith("NEW_KEY=v1\n")).toBe(true);
+    expect(out).toContain("BAR_API_KEY=keep\n");
+  });
+
+  it("deletes the key line when value is null", () => {
+    const out = upsertEnvLines(ENV_FIXTURE, "FOO_API_KEY", null);
+    expect(out).not.toContain("FOO_API_KEY=old-value");
+    expect(out).toContain("BAR_API_KEY=keep\n");
+  });
+
+  it("appends to an empty file", () => {
+    expect(upsertEnvLines("", "K", "v")).toBe("K=v\n");
+  });
+
+  it("no-ops a delete when the key is absent", () => {
+    expect(upsertEnvLines(ENV_FIXTURE, "MISSING_KEY", null)).toBe(ENV_FIXTURE);
+  });
+});
+
+describe("buildCronRepinPlan", () => {
+  const JOBS = {
+    jobs: [
+      {
+        id: "a1",
+        enabled: true,
+        provider: "glm-flash",
+        model: "glm-5.3-flash",
+      },
+      { id: "b2", enabled: true, provider: "glm-flash", model: null },
+      {
+        id: "c3",
+        enabled: false,
+        provider: "glm-flash",
+        model: "glm-5.3-flash",
+      },
+      { id: "d4", enabled: true, provider: "kimi-coding", model: "k3" },
+      { id: "e5", enabled: true, provider: null, model: null },
+    ],
+    updated_at: "2026-09-06T00:00:00Z",
+  };
+
+  it("hits only enabled jobs pinned to the old provider", () => {
+    const plan = buildCronRepinPlan(JOBS, "glm-flash");
+    expect(plan.map((p) => p.jobId)).toEqual(["a1", "b2"]);
+    expect(plan[0]).toEqual({
+      jobId: "a1",
+      prevProvider: "glm-flash",
+      prevModel: "glm-5.3-flash",
+    });
+    expect(plan[1].prevModel).toBeNull();
+  });
+
+  it("returns [] when nothing is pinned to the old provider", () => {
+    expect(buildCronRepinPlan(JOBS, "nonexistent")).toEqual([]);
+  });
+
+  it("tolerates malformed jobs.json (never throws)", () => {
+    expect(buildCronRepinPlan(undefined, "x")).toEqual([]);
+    expect(buildCronRepinPlan(null, "x")).toEqual([]);
+    expect(buildCronRepinPlan({ nope: 1 }, "x")).toEqual([]);
+    expect(buildCronRepinPlan({ jobs: "not-array" }, "x")).toEqual([]);
+    expect(
+      buildCronRepinPlan({ jobs: [null, 42, { enabled: true }] }, "x"),
+    ).toEqual([]);
+  });
+});
+
+describe("hermes registry parse/serialize", () => {
+  it("round-trips a valid registry", () => {
+    const reg: HermesProviderRegistry = {
+      "Kimi For Coding": { id: "kimi-coding", keyEnv: "KIMI_CODING_API_KEY" },
+      "glm flash lastest": {
+        id: "glm-flash",
+        keyEnv: "BIGMODEL_API_KEY",
+        modelOverride: "glm-5.3-flash",
+      },
+    };
+    expect(parseHermesRegistry(serializeHermesRegistry(reg))).toEqual(reg);
+  });
+
+  it("corrupt/missing content parses as an empty registry (best-effort)", () => {
+    expect(parseHermesRegistry("not json {")).toEqual({});
+    expect(parseHermesRegistry("null")).toEqual({});
+    expect(parseHermesRegistry("[1,2]")).toEqual({});
+    expect(parseHermesRegistry("")).toEqual({});
+  });
+
+  it("drops entries missing id/keyEnv", () => {
+    const reg = parseHermesRegistry(
+      JSON.stringify({
+        good: { id: "a", keyEnv: "A_API_KEY" },
+        bad: { id: "b" },
+        worse: 42,
+      }),
+    );
+    expect(Object.keys(reg)).toEqual(["good"]);
+  });
+});
+
+describe("hermes state file parse/serialize", () => {
+  const STATE: HermesStateFile = {
+    lastSwitch: {
+      ts: 1788700000000,
+      ccName: "Kimi For Coding",
+      to: {
+        id: "kimi-coding",
+        model: "k3",
+        base_url: "https://api.kimi.com/coding/",
+      },
+      from: {
+        id: "glm-flash",
+        model: "glm-5.3-flash",
+        base_url: "https://open.bigmodel.cn/api/anthropic",
+      },
+      configBackup:
+        "/home/u/.hermes/config.yaml.bak-before-kimi-coding-1788700000",
+      env: { key: "KIMI_CODING_API_KEY", prevValue: null },
+      cronRepinned: [
+        {
+          jobId: "d2676ff8582c",
+          prevProvider: "glm-flash",
+          prevModel: "glm-5.3-flash",
+        },
+      ],
+    },
+  };
+
+  it("round-trips", () => {
+    const r = parseHermesStateFile(serializeHermesStateFile(STATE));
+    if ("error" in r) throw new Error(`unexpected: ${r.error}`);
+    expect(r.state).toEqual(STATE);
+  });
+
+  it("malformed JSON → {error} (不猜)", () => {
+    expect("error" in parseHermesStateFile("{nope")).toBe(true);
+    expect("error" in parseHermesStateFile("null")).toBe(true);
+    expect("error" in parseHermesStateFile("{}")).toBe(true);
+    expect(
+      "error" in
+        parseHermesStateFile(JSON.stringify({ lastSwitch: { ts: "x" } })),
+    ).toBe(true);
+  });
+});
+
+describe("HERMES_PROVIDER_SEEDS", () => {
+  it("contains the built-in seeds", () => {
+    // "kimi" 是 cc-switch 真实条目名（09-06 实机冒烟实证）；
+    // "Kimi For Coding" 保留作别名防御
+    expect(HERMES_PROVIDER_SEEDS["kimi"]).toEqual({
+      id: "kimi-coding",
+      keyEnv: "KIMI_CODING_API_KEY",
+    });
+    expect(HERMES_PROVIDER_SEEDS["Kimi For Coding"]).toEqual({
+      id: "kimi-coding",
+      keyEnv: "KIMI_CODING_API_KEY",
+    });
+    expect(HERMES_PROVIDER_SEEDS["glm flash lastest"]).toEqual({
+      id: "glm-flash",
+      keyEnv: "BIGMODEL_API_KEY",
+    });
   });
 });

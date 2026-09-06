@@ -4,13 +4,15 @@ Thin CLI wrapper around the `agy` and `claude` CLI backends, exposing a single g
 
 gcli routes to either backend via a leading subcommand (`claude` default — bare `gcli` ≡ `gcli claude`; `agy` requires the explicit subcommand), adds a hard timeout (spawn SIGTERM), 50k-char output truncation, explicit exit codes, stdin piping (`-p -`), and an interactive TUI mode. For the claude backend it also handles cc-switch provider switching inline via `claude ... --settings`, without ever rewriting `~/.claude/settings.json`; in a TTY without `--provider` it offers an arrow-key provider picker (↑↓/j/k + Emacs C-n/C-p/C-g/M-<M->, order mirroring cc-switch's DB, quota subtitles with live usage% + next-reset for kimi/glm coding plans) that remembers the last choice in `~/.config/gcli/last-provider` and reuses it silently in print mode (`--pick` forces the menu). Never triggered non-TTY — zero prompts, zero DB reads, zero memory/quota IO.
 
+The `hermes` subcommand is a different beast — not a chat backend but a one-shot model/provider switcher for the hermes agent (`~/.hermes/`): it reads provider facts from cc-switch.db (read-only), rewrites hermes' `config.yaml` via a hand-rolled line-level YAML editor (errors out on unrecognized structure rather than guessing), upserts the provider key into `.env` (0o600), re-pins enabled cron jobs off the old provider, restarts the gateway, then verifies (a `hermes -z` ping hard gate + best-effort state.db check) with automatic full-chain rollback on failure. `status`/`rollback`/`--dry-run`/`--keep-on-fail` supported; the last switch is recorded in `~/.config/gcli/hermes-state.json` so `rollback` toggles back and forth. Token red line: output only ever prints key names, never token values.
+
 ## Architecture
 
 Single-file CLI (`src/cli.ts`). No runtime dependencies (Node built-ins only).
 
 ### Subcommand routing
-- `parseSubcommand(argv)` — strict: argv[0] must be `agy`, `claude`, `api`, a `-`-prefixed flag, or empty. Any other leading token is an error (`unknown subcommand: <x>`). A leading flag or empty argv yields `subcommand: undefined` — a pure sentinel; the "default = claude" decision lives in `run()`. `gcli -p claude` therefore lands on the default claude path (argv[0]=`-p`) with prompt="claude" — the subcommand must literally lead.
-- `run(argv, deps)` — the DI entry point: parseSubcommand → parseCliArgs → dispatch: explicit `agy` → `runAgyBackend`, otherwise (explicit `claude` or the undefined sentinel) → `runClaudeBackend`. Returns `{exitCode, stdout, stderr}`; `main()` owns `process.exit`.
+- `parseSubcommand(argv)` — strict: argv[0] must be `agy`, `claude`, `api`, `hermes`, a `-`-prefixed flag, or empty. Any other leading token is an error (`unknown subcommand: <x>`). A leading flag or empty argv yields `subcommand: undefined` — a pure sentinel; the "default = claude" decision lives in `run()`. `gcli -p claude` therefore lands on the default claude path (argv[0]=`-p`) with prompt="claude" — the subcommand must literally lead.
+- `run(argv, deps)` — the DI entry point: parseSubcommand → parseCliArgs → dispatch: explicit `agy` → `runAgyBackend`, explicit `hermes` → `parseHermesArgs` (strict, no passthrough — there is no backend to forward to) → `runHermesBackend` (`status`/`rollback` reserved positionals, otherwise a provider switch), otherwise (explicit `claude` or the undefined sentinel) → `runClaudeBackend`. Returns `{exitCode, stdout, stderr}`; `main()` owns `process.exit`.
 
 ### Key components
 - `parseCliArgs()` — argv parsing (`node:util` parseArgs, **`strict:false` + `tokens:true`**). Known options are consumed; unknown flags and bare positionals are auto-forwarded to the backend (passthrough). `--` forwards everything after it unconditionally. Validates `--timeout` range.
@@ -26,6 +28,8 @@ Single-file CLI (`src/cli.ts`). No runtime dependencies (Node built-ins only).
 - `runAgy()` / `runClaude()` — print-mode spawn: inherit stdin, pipe stdout/stderr, SIGTERM on timeout.
 - `spawnInteractive()` / `runAgyInteractive()` / `runClaudeInteractive()` — interactive TUI spawn: fully inherited stdio, no timeout/truncation; child exit code passed through (signal → 128+signo).
 - `truncate()` — caps stdout at 50,000 characters (print mode only).
+- `editHermesConfig()` / `parseHermesConfig()` / `upsertEnvLines()` — the hermes switcher's pure file helpers: a targeted line-level YAML editor that touches only the top-level `model:` (3 keys) and `providers:` (one entry) sections of hermes' `config.yaml` and byte-preserves everything else (missing sections or unexpected nesting → `{error}`, never a guess; zero-dep, no yaml lib), a reader for the same sections, and a `.env` `KEY=value` upsert (value=null deletes; comments/blank lines preserved). Plus small pure helpers: `stripContextSuffix` (`[1M]` markers), `deriveHermesId`/`deriveKeyEnv`, `quoteYamlScalar`.
+- `hermesStatus()` / `hermesRollback()` / `hermesSwitch()` / `runHermesBackend()` — hermes orchestration: backup config.yaml → edit model/providers (atomic tmp+rename write) → .env upsert (0o600) → cron re-pin (enabled jobs pinned to the old provider only, per-job failure = warn-and-continue) → gateway restart → verify (`hermes -z` ping 60s hard gate + best-effort state.db `session_model_usage` comparison) → auto-rollback the whole chain on failure unless `--keep-on-fail`. State for rollback lives in `~/.config/gcli/hermes-state.json` (0o600; contains the previous token's prevValue); the cc-switch name → hermes id/keyEnv mapping lives in `~/.config/gcli/hermes-providers.json` with built-in seeds (`HERMES_PROVIDER_SEEDS`) as fallback. TTY without a provider argument opens the picker; non-TTY without one is exit 2 (zero interaction).
 - `mapSpawnResult()` — normalizes a backend `SpawnResult` into a gcli `RunOutcome` (timeout / non-zero / empty / success).
 - `main()` — wires production deps (`RunDeps`), invokes `run()`, writes stdout/stderr, exits.
 
@@ -33,7 +37,7 @@ Single-file CLI (`src/cli.ts`). No runtime dependencies (Node built-ins only).
 `main()` runs only when the file is invoked directly. The guard uses `realpathSync` (not `resolve`) so it holds under the npm-link symlink — `resolve()` does not follow symlinks and silently skipped `main()` when run via the global bin.
 
 ### Dependency injection (testability)
-All spawn / IO / cc-switch access is funneled through the `RunDeps` interface (`runAgy`, `runClaude`, `runAgyInteractive`, `runClaudeInteractive`, `readCcSwitchProvider`, `pickProvider`, `readLastProvider`, `writeLastProvider`, `fetchProviderQuotas`, `readStdin`, `isInteractive`). `main()` wires the production impls; tests inject fakes so acceptance tests never depend on the real `agy`/`claude`/`sqlite3` binaries or network.
+All spawn / IO / cc-switch access is funneled through the `RunDeps` interface (`runAgy`, `runClaude`, `runAgyInteractive`, `runClaudeInteractive`, `readCcSwitchProvider`, `pickProvider`, `readLastProvider`, `writeLastProvider`, `fetchProviderQuotas`, `readStdin`, `isInteractive`, plus the hermes-only `runHermes`/`readTextFile`/`writeTextFileAtomic`/`copyFile`/`queryLastSessionModel`). `main()` wires the production impls; tests inject fakes so acceptance tests never depend on the real `agy`/`claude`/`hermes`/`sqlite3` binaries or network.
 
 ## Develop commands
 
@@ -61,13 +65,14 @@ npm run lint:fix   # biome check --write src
 
 ## Testing conventions
 
-- `cli.test.ts` — unit tests for pure helpers (`parseSubcommand`, `buildAgyArgs`, `buildClaudeArgs`, `parseCliArgs`, `matchProviderName`, `extractProviderEnv`, `buildSettingsEnv`, `applyPickerKey`, `buildQuotaRequest`, `parseKimiUsages`, `parseGlmQuota`, `formatQuota`, `truncate`).
+- `cli.test.ts` — unit tests for pure helpers (`parseSubcommand`, `buildAgyArgs`, `buildClaudeArgs`, `parseCliArgs`, `matchProviderName`, `extractProviderEnv`, `buildSettingsEnv`, `applyPickerKey`, `buildQuotaRequest`, `parseKimiUsages`, `parseGlmQuota`, `formatQuota`, `truncate`, plus the hermes helpers `parseHermesArgs`, `stripContextSuffix`, `deriveHermesId`, `deriveKeyEnv`, `quoteYamlScalar`, `editHermesConfig`, `parseHermesConfig`, `upsertEnvLines`, cron re-pin planning).
 - `*.acceptance.test.ts` — red-team acceptance tests via `RunDeps` mocks:
-  - `subcommand.acceptance.test.ts` — argv routing (`agy` / `claude` / `api` / unknown / default sentinel)
+  - `subcommand.acceptance.test.ts` — argv routing (`agy` / `claude` / `api` / `hermes` / unknown / default sentinel)
   - `claude-args.acceptance.test.ts` — claude argv shape across provider/model/passthrough combos
   - `claude-runtime.acceptance.test.ts` — end-to-end claude flows (provider lookup, TTY guard, version, empty output, --yolo/--sandbox rejection)
   - `provider.acceptance.test.ts` — cc-switch provider matching, env extraction, model pinning
   - `provider-picker.acceptance.test.ts` — TTY provider picker (arrow/Emacs keymap, DB-order entries + quota passthrough, memory read/write timing, print silent-reuse + --pick matrix, trigger closure for fetchProviderQuotas, soft degradation, non-TTY zero-prompt zero-DB zero-memory zero-quota)
+  - `hermes.acceptance.test.ts` — the hermes switcher (status/rollback/switch orchestration, config.yaml line-level editing incl. structural-error zero-write, .env upsert with 0o600 + token-redaction red lines, cron re-pin, gateway restart, verify gate + auto-rollback chain, --dry-run zero-write zero-spawn, TTY picker / non-TTY exit-2)
 - No acceptance test spawns a real binary — everything goes through fakes.
 
 ## Backend flag differences

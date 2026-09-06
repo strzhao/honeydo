@@ -27,7 +27,16 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { emitKeypressEvents } from "node:readline";
@@ -67,6 +76,50 @@ const QUOTA_TTL_OK_MS = 60_000;
 const QUOTA_TTL_FAIL_MS = 15_000;
 const QUOTA_FETCH_TIMEOUT_MS = 2_500;
 
+// ---------------------------------------------------------------------------
+// hermes backend — paths & constants
+// ---------------------------------------------------------------------------
+
+const HERMES_BIN = "hermes";
+
+/** hermes 主配置文件（model 段 + providers 段是本子命令的编辑目标）。 */
+export const HERMES_CONFIG_PATH = `${homedir()}/.hermes/config.yaml`;
+
+/** hermes env 文件（provider API key 的落点；全程保持 0o600）。 */
+export const HERMES_ENV_PATH = `${homedir()}/.hermes/.env`;
+
+/** hermes cron 任务定义（重 pin 只读它；改动经 `hermes cron edit` 下发）。 */
+export const HERMES_CRON_JOBS_PATH = `${homedir()}/.hermes/cron/jobs.json`;
+
+/** hermes 会话库（session_model_usage 表在此 —— 实测在顶层 state.db）。 */
+export const HERMES_STATE_DB_PATH = `${homedir()}/.hermes/state.db`;
+
+/** cc-switch name → hermes provider 字段映射（keyEnv/modelOverride）。 */
+export const HERMES_PROVIDERS_REGISTRY_PATH = `${homedir()}/.config/gcli/hermes-providers.json`;
+
+/** 上一次切换的一跳记录（0o600，含旧 token 的 prevValue）。 */
+export const HERMES_STATE_PATH = `${homedir()}/.config/gcli/hermes-state.json`;
+
+/** hermes providers 条目的 transport 常量（cc-switch 只提供 anthropic 兼容端点）。 */
+export const HERMES_TRANSPORT = "anthropic_messages";
+
+/** 切换后验证 ping 的硬超时。 */
+export const HERMES_VERIFY_TIMEOUT_MS = 60_000;
+
+/**
+ * 内置 seed（防推导造出与现有配置平行的条目）：键是 cc-switch provider 名，
+ * 值是 hermes 侧已手工建立好的 id/keyEnv。
+ */
+export const HERMES_PROVIDER_SEEDS: HermesProviderRegistry = {
+  // cc-switch 真实条目名（09-06 sqlite3 实证）：kimi 系的 coding plan 条目叫 "kimi"
+  kimi: { id: "kimi-coding", keyEnv: "KIMI_CODING_API_KEY" },
+  "Kimi For Coding": { id: "kimi-coding", keyEnv: "KIMI_CODING_API_KEY" },
+  "glm flash lastest": { id: "glm-flash", keyEnv: "BIGMODEL_API_KEY" },
+};
+
+/** `status`/`rollback` 为 hermes 子命令的保留字位置参数。 */
+const HERMES_RESERVED_WORDS = new Set(["status", "rollback"]);
+
 /** Provider-name allowlist (C4b). Names outside this set are rejected. */
 const PROVIDER_NAME_RE = /^[A-Za-z0-9 &._-]+$/;
 
@@ -74,7 +127,7 @@ const PROVIDER_NAME_RE = /^[A-Za-z0-9 &._-]+$/;
 // Types — DI contract (aligns with acceptance tests)
 // ---------------------------------------------------------------------------
 
-export type Subcommand = "agy" | "claude" | "api";
+export type Subcommand = "agy" | "claude" | "api" | "hermes";
 
 export type SubcommandResult =
   | { subcommand: Subcommand | undefined; rest: string[] }
@@ -107,6 +160,65 @@ export type PickerOutcome =
 
 /** A cc-switch provider row as exposed to the claude backend. */
 export type RawProvider = { name: string; settingsConfig: unknown };
+
+// ---------------------------------------------------------------------------
+// hermes backend — types
+// ---------------------------------------------------------------------------
+
+/** registry 单条：cc-switch name → hermes providers 条目字段。 */
+export type HermesProviderRegistryEntry = {
+  id: string;
+  keyEnv: string;
+  modelOverride?: string;
+};
+
+/** `~/.config/gcli/hermes-providers.json` 的形状（损坏/缺失视为空）。 */
+export type HermesProviderRegistry = Record<
+  string,
+  HermesProviderRegistryEntry
+>;
+
+/** 一跳切换的一端（from/to 同构）。 */
+export type HermesModelPoint = { id: string; model: string; base_url: string };
+
+/** 一条被重 pin 的 cron job 的旧 pin（rollback 回放用）。 */
+export type CronRepinTarget = {
+  jobId: string;
+  prevProvider: string;
+  prevModel: string | null;
+};
+
+/** `~/.config/gcli/hermes-state.json`（0o600，env.prevValue 含旧 token）。 */
+export type HermesStateFile = {
+  lastSwitch: {
+    ts: number;
+    ccName: string;
+    to: HermesModelPoint;
+    from: HermesModelPoint;
+    configBackup: string;
+    env: { key: string; prevValue: string | null };
+    cronRepinned: CronRepinTarget[];
+  };
+};
+
+/** editHermesConfig 的编辑指令。 */
+export type HermesConfigEdit = {
+  model: { default: string; provider: string; base_url: string };
+  provider: {
+    id: string;
+    name: string;
+    base_url: string;
+    transport: string;
+    key_env: string;
+    default_model: string;
+  };
+};
+
+/** parseHermesConfig 的读取结果（status / 冲突检测共用）。 */
+export type HermesConfigInfo = {
+  model: { default?: string; provider?: string; base_url?: string };
+  providerIds: string[];
+};
 
 export type ProviderLookup =
   | { ok: true; providers: RawProvider[] }
@@ -202,6 +314,28 @@ export type RunDeps = {
    * after an arrow-key picker confirm, before any backend spawn.
    */
   writeLastProvider: (name: string) => Promise<void>;
+
+  // --- hermes 子命令注入点（main() 一律装配；仅 hermes 路径消费） ---
+
+  /** Spawn `hermes <args>`（cron edit / gateway / -z ping），照 runClaude 的 timeout/SIGTERM 契约。 */
+  runHermes: (args: string[], timeoutMs?: number) => Promise<SpawnResult>;
+  /** 读 UTF-8 文本文件；缺失/不可读 → undefined（不 throw）。 */
+  readTextFile: (path: string) => Promise<string | undefined>;
+  /** 原子写（tmp + rename）；mode 缺省时沿用目标文件现有权限（不存在则 0o600）。 */
+  writeTextFileAtomic: (
+    path: string,
+    text: string,
+    mode?: number,
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
+  /** 整文件复制（备份/整文件恢复）。 */
+  copyFile: (
+    src: string,
+    dest: string,
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
+  /** 查 state.db session_model_usage 最新行（best-effort 验证）；任何失败 → undefined。 */
+  queryLastSessionModel: () => Promise<
+    { model: string; provider: string } | undefined
+  >;
 };
 
 export type RunOutcome = { exitCode: number; stdout: string; stderr: string };
@@ -228,6 +362,7 @@ export function parseSubcommand(argv: string[]): SubcommandResult {
   if (first === "agy") return { subcommand: "agy", rest: argv.slice(1) };
   if (first === "claude") return { subcommand: "claude", rest: argv.slice(1) };
   if (first === "api") return { subcommand: "api", rest: argv.slice(1) };
+  if (first === "hermes") return { subcommand: "hermes", rest: argv.slice(1) };
   if (first.startsWith("-")) return { subcommand: undefined, rest: argv };
   return { error: `unknown subcommand: ${first}` };
 }
@@ -733,6 +868,536 @@ export function extractNonStreamText(body: unknown): string {
     }
   }
   return out;
+}
+
+/** Parsed options for the hermes subcommand (strict: unknown flags error). */
+export interface ParsedHermesArgs {
+  /** Positional: provider name, or a reserved word (status/rollback). */
+  provider?: string;
+  model?: string;
+  dryRun: boolean;
+  verify: boolean;
+  keepOnFail: boolean;
+  help: boolean;
+}
+
+export type ParseHermesResult = ParsedHermesArgs | { error: string };
+
+// ---------------------------------------------------------------------------
+// hermes backend — pure helpers (unit-tested in cli.test.ts)
+// ---------------------------------------------------------------------------
+
+/**
+ * Strip a trailing context-window marker like `[1M]` (a claude-agent
+ * convention cc-switch stores in model names; raw APIs reject it).
+ * Only a suffix anchored at the very end is removed.
+ */
+export function stripContextSuffix(model: string): string {
+  return model.replace(/\[[^\]]*\]$/, "");
+}
+
+/** cc-switch 值入行级文件（.env/config.yaml）前的消毒：拒绝裸换行（防行注入）。 */
+function containsLineBreak(value: string): boolean {
+  return value.includes("\n") || value.includes("\r");
+}
+
+/**
+ * Parse argv for `gcli hermes ...`. Strict like parseApiArgs (unknown flags
+ * are exit-2 errors — there is no backend to forward to). `--no-verify` is
+ * accepted via allowNegative. At most one positional.
+ */
+export function parseHermesArgs(argv: string[]): ParseHermesResult {
+  try {
+    const { values, positionals } = parseArgs({
+      args: argv,
+      options: {
+        model: { type: "string" },
+        "dry-run": { type: "boolean" },
+        verify: { type: "boolean" },
+        "keep-on-fail": { type: "boolean" },
+        help: { type: "boolean" },
+      },
+      strict: true,
+      allowPositionals: true,
+      allowNegative: true,
+    });
+    if (positionals.length > 1) {
+      return {
+        error: `hermes: unexpected extra argument: "${positionals[1]}" (usage: gcli hermes <provider|status|rollback> [--model <m>] [--dry-run] [--no-verify] [--keep-on-fail])`,
+      };
+    }
+    return {
+      provider: positionals[0],
+      model: typeof values.model === "string" ? values.model : undefined,
+      dryRun: values["dry-run"] === true,
+      verify: values.verify !== false,
+      keepOnFail: values["keep-on-fail"] === true,
+      help: values.help === true,
+    };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Derive a hermes provider id from a cc-switch display name: lowercase,
+ * non-[a-z0-9] runs folded to `-`, leading/trailing dashes trimmed.
+ * May return "" for names with no alphanumerics (caller treats as error).
+ */
+export function deriveHermesId(ccName: string): string {
+  return ccName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+/** Derive the .env key name from a hermes provider id: UPPER + `_API_KEY`. */
+export function deriveKeyEnv(id: string): string {
+  return `${id.toUpperCase().replace(/-/g, "_")}_API_KEY`;
+}
+
+/** Safe YAML scalars are written bare; anything else is single-quoted. */
+const SAFE_YAML_SCALAR_RE = /^[A-Za-z0-9._/:@-]+$/;
+
+/** Quote a scalar for our line-level YAML writer ('' escapes a single quote). */
+export function quoteYamlScalar(value: string): string {
+  if (value === "") return "''";
+  if (SAFE_YAML_SCALAR_RE.test(value)) return value;
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+/** Inverse of quoteYamlScalar for reading (unescapes '' inside '...'). */
+function unquoteYamlScalar(raw: string): string {
+  const t = raw.trim();
+  if (t.length >= 2 && t.startsWith("'") && t.endsWith("'")) {
+    return t.slice(1, -1).replace(/''/g, "'");
+  }
+  return t;
+}
+
+/** col-0 bare section header, e.g. `model:` / `providers:` (nothing after `:`). */
+const TOP_SECTION_RE = /^(\S[^:]*):\s*$/;
+
+type SectionSpan = { key: string; headerLine: number; endLine: number };
+
+/**
+ * Where to insert new lines at a section's end: just before endLine, unless
+ * the preceding element is the trailing-newline artifact (`"a\n".split("\n")
+ * → ["a",""]`), in which case before that empty element — so an appended
+ * block keeps the file's trailing newline and gains no stray blank line.
+ */
+function sectionInsertAt(lines: string[], span: SectionSpan): number {
+  let at = span.endLine;
+  while (at > span.headerLine + 1 && lines[at - 1] === "") at--;
+  return at;
+}
+
+/**
+ * Build the top-level section table: col-0 `key:` headers delimit sections;
+ * any other col-0 line (a scalar like `timezone: Asia/Shanghai`) is still a
+ * boundary. endLine is exclusive.
+ */
+function findTopLevelSections(lines: string[]): SectionSpan[] {
+  const col0: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\S/.test(lines[i])) col0.push(i);
+  }
+  const spans: SectionSpan[] = [];
+  for (let j = 0; j < col0.length; j++) {
+    const start = col0[j];
+    const m = TOP_SECTION_RE.exec(lines[start]);
+    if (m === null) continue;
+    const end = j + 1 < col0.length ? col0[j + 1] : lines.length;
+    spans.push({ key: m[1], headerLine: start, endLine: end });
+  }
+  return spans;
+}
+
+/**
+ * Edit the top-level `model:` section (2-space `key: value` lines only):
+ * replace the wanted keys in place; insert missing ones at the section end;
+ * any unexpected structure (deeper nesting, a bare `key:` sub-section) is an
+ * error — 宁报错不猜.
+ */
+function editModelSection(
+  lines: string[],
+  span: SectionSpan,
+  model: HermesConfigEdit["model"],
+): { lines: string[] } | { error: string } {
+  const wanted: [string, string][] = [
+    ["default", model.default],
+    ["provider", model.provider],
+    ["base_url", model.base_url],
+  ];
+  const out = [...lines];
+  const found = new Set<string>();
+  for (let i = span.headerLine + 1; i < span.endLine; i++) {
+    const line = out[i];
+    if (line.trim() === "" || line.trimStart().startsWith("#")) continue;
+    // exactly 2-space indent, then `key: value`; a 4-space line (nested) or a
+    // bare `key:` (sub-section) fails this match → structural error.
+    const m = /^( {2})([^\s:#][^:]*?):(.+)$/.exec(line);
+    if (m === null) {
+      return {
+        error: `config.yaml model 段第 ${i + 1} 行结构无法识别（意外嵌套？）: ${line.trim()}`,
+      };
+    }
+    const key = m[2].trim();
+    const w = wanted.find(([k]) => k === key);
+    if (w !== undefined) {
+      out[i] = `${m[1]}${key}: ${quoteYamlScalar(w[1])}`;
+      found.add(key);
+    }
+  }
+  const missing = wanted.filter(([k]) => !found.has(k));
+  if (missing.length > 0) {
+    out.splice(
+      sectionInsertAt(out, span),
+      0,
+      ...missing.map(([k, v]) => `  ${k}: ${quoteYamlScalar(v)}`),
+    );
+  }
+  return { lines: out };
+}
+
+/**
+ * Edit the top-level `providers:` section: entries are 2-space `id:` blocks
+ * with 4-space `key: value` fields. Upserts the wanted fields of the entry
+ * `prov.id` (missing fields appended at the block end); appends a new block
+ * at the section end when the id is absent. Any other shape → error.
+ */
+function editProvidersSection(
+  lines: string[],
+  span: SectionSpan,
+  prov: HermesConfigEdit["provider"],
+): { lines: string[] } | { error: string } {
+  const wanted: [string, string][] = [
+    ["name", prov.name],
+    ["base_url", prov.base_url],
+    ["transport", prov.transport],
+    ["key_env", prov.key_env],
+    ["default_model", prov.default_model],
+  ];
+  type Entry = { id: string; start: number; end: number };
+  const entries: Entry[] = [];
+  let cur: Entry | undefined;
+  for (let i = span.headerLine + 1; i < span.endLine; i++) {
+    const line = lines[i];
+    if (line.trim() === "" || line.trimStart().startsWith("#")) continue;
+    const h = /^ {2}(\S[^:]*):\s*$/.exec(line);
+    if (h !== null) {
+      cur = { id: h[1], start: i, end: i + 1 };
+      entries.push(cur);
+      continue;
+    }
+    const f = /^ {4}\S[^:]*:/.exec(line);
+    if (f !== null && cur !== undefined) {
+      cur.end = i + 1;
+      continue;
+    }
+    return {
+      error: `config.yaml providers 段第 ${i + 1} 行结构无法识别（意外嵌套？）: ${line.trim()}`,
+    };
+  }
+  const out = [...lines];
+  const target = entries.find((e) => e.id === prov.id);
+  if (target === undefined) {
+    const block = [
+      `  ${prov.id}:`,
+      ...wanted.map(([k, v]) => `    ${k}: ${quoteYamlScalar(v)}`),
+    ];
+    out.splice(sectionInsertAt(out, span), 0, ...block);
+    return { lines: out };
+  }
+  const found = new Set<string>();
+  for (let i = target.start + 1; i < target.end; i++) {
+    const line = out[i];
+    const f = /^( {4})([^\s:#][^:]*?):/.exec(line);
+    if (f === null) continue; // blank/comment line inside the block
+    const key = f[2].trim();
+    const w = wanted.find(([k]) => k === key);
+    if (w !== undefined) {
+      out[i] = `${f[1]}${key}: ${quoteYamlScalar(w[1])}`;
+      found.add(key);
+    }
+  }
+  const missing = wanted.filter(([k]) => !found.has(k));
+  if (missing.length > 0) {
+    out.splice(
+      target.end,
+      0,
+      ...missing.map(([k, v]) => `    ${k}: ${quoteYamlScalar(v)}`),
+    );
+  }
+  return { lines: out };
+}
+
+/**
+ * Targeted line-level YAML editor for hermes' config.yaml (zero-dep: no yaml
+ * lib guaranteed). Only the top-level `model:` (3 keys) and `providers:`
+ * (one entry) sections are touched; everything else is byte-preserved.
+ * Missing sections / unexpected nesting → {error}, never a guess (callers
+ * must not write on error). Idempotent by construction.
+ */
+export function editHermesConfig(
+  text: string,
+  edit: HermesConfigEdit,
+): { text: string } | { error: string } {
+  const lines = text.split("\n");
+  const modelSpan = findTopLevelSections(lines).find((s) => s.key === "model");
+  if (modelSpan === undefined) {
+    return { error: "config.yaml 缺少顶层 model: 段" };
+  }
+  const r1 = editModelSection(lines, modelSpan, edit.model);
+  if ("error" in r1) return r1;
+  const provSpan = findTopLevelSections(r1.lines).find(
+    (s) => s.key === "providers",
+  );
+  if (provSpan === undefined) {
+    return { error: "config.yaml 缺少顶层 providers: 段" };
+  }
+  const r2 = editProvidersSection(r1.lines, provSpan, edit.provider);
+  if ("error" in r2) return r2;
+  return { text: r2.lines.join("\n") };
+}
+
+/**
+ * Read (not edit) the parts of config.yaml the hermes backend needs: the
+ * current model section values and the list of providers entry ids.
+ * Missing model: section or unparseable model lines → {error}.
+ */
+export function parseHermesConfig(
+  text: string,
+): { info: HermesConfigInfo } | { error: string } {
+  const lines = text.split("\n");
+  const sections = findTopLevelSections(lines);
+  const modelSpan = sections.find((s) => s.key === "model");
+  if (modelSpan === undefined) {
+    return { error: "config.yaml 缺少顶层 model: 段" };
+  }
+  const model: HermesConfigInfo["model"] = {};
+  for (let i = modelSpan.headerLine + 1; i < modelSpan.endLine; i++) {
+    const line = lines[i];
+    if (line.trim() === "" || line.trimStart().startsWith("#")) continue;
+    const m = /^ {2}([^\s:#][^:]*?):(.*)$/.exec(line);
+    if (m === null) {
+      return {
+        error: `config.yaml model 段第 ${i + 1} 行结构无法识别: ${line.trim()}`,
+      };
+    }
+    const key = m[1].trim();
+    const val = unquoteYamlScalar(m[2]);
+    if (key === "default") model.default = val;
+    else if (key === "provider") model.provider = val;
+    else if (key === "base_url") model.base_url = val;
+  }
+  const providerIds: string[] = [];
+  const provSpan = sections.find((s) => s.key === "providers");
+  if (provSpan !== undefined) {
+    for (let i = provSpan.headerLine + 1; i < provSpan.endLine; i++) {
+      const h = /^ {2}(\S[^:]*):\s*$/.exec(lines[i]);
+      if (h !== null) providerIds.push(h[1]);
+    }
+  }
+  return { info: { model, providerIds } };
+}
+
+/**
+ * Upsert one `KEY=value` line in a .env text (pure). Only active lines
+ * (`^KEY=`) match — commented-out occurrences are left alone; comments and
+ * blank lines are byte-preserved. value=null deletes the line(s); a missing
+ * key with a non-null value is appended at the end.
+ */
+export function upsertEnvLines(
+  text: string,
+  key: string,
+  value: string | null,
+): string {
+  const lines = text.split("\n");
+  const prefix = `${key}=`;
+  let seen = false;
+  const out: string[] = [];
+  for (const line of lines) {
+    if (line.startsWith(prefix)) {
+      seen = true;
+      if (value !== null) out.push(`${key}=${value}`);
+      continue; // null → drop the line
+    }
+    out.push(line);
+  }
+  if (!seen && value !== null) {
+    // keep a trailing newline trailing: insert before a final empty element
+    if (out.length > 0 && out[out.length - 1] === "") {
+      out.splice(out.length - 1, 0, `${key}=${value}`);
+    } else {
+      out.push(`${key}=${value}`);
+    }
+  }
+  return out.join("\n");
+}
+
+/**
+ * Plan cron re-pins: jobs that are enabled AND pinned to `oldProvider`
+ * (jobs.json shape `{jobs: [...]}`, a bare array tolerated). Malformed input
+ * yields an empty plan, never a throw.
+ */
+export function buildCronRepinPlan(
+  jobsJson: unknown,
+  oldProvider: string,
+): CronRepinTarget[] {
+  const jobs = Array.isArray(jobsJson)
+    ? jobsJson
+    : typeof jobsJson === "object" && jobsJson !== null
+      ? (jobsJson as Record<string, unknown>).jobs
+      : undefined;
+  if (!Array.isArray(jobs)) return [];
+  const out: CronRepinTarget[] = [];
+  for (const j of jobs) {
+    if (typeof j !== "object" || j === null) continue;
+    const r = j as Record<string, unknown>;
+    if (r.enabled !== true) continue;
+    if (r.provider !== oldProvider) continue;
+    if (typeof r.id !== "string" || r.id === "") continue;
+    out.push({
+      jobId: r.id,
+      prevProvider: oldProvider,
+      prevModel: typeof r.model === "string" && r.model !== "" ? r.model : null,
+    });
+  }
+  return out;
+}
+
+/**
+ * Parse the provider registry (`hermes-providers.json`). Corrupt/missing
+ * content is best-effort → empty registry; entries lacking id/keyEnv are
+ * dropped.
+ */
+export function parseHermesRegistry(text: string): HermesProviderRegistry {
+  try {
+    const raw: unknown = JSON.parse(text);
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      return {};
+    }
+    const out: HermesProviderRegistry = {};
+    for (const [k, v] of Object.entries(raw)) {
+      if (typeof v !== "object" || v === null) continue;
+      const r = v as Record<string, unknown>;
+      if (typeof r.id !== "string" || r.id === "") continue;
+      if (typeof r.keyEnv !== "string" || r.keyEnv === "") continue;
+      const entry: HermesProviderRegistryEntry = { id: r.id, keyEnv: r.keyEnv };
+      if (typeof r.modelOverride === "string" && r.modelOverride !== "") {
+        entry.modelOverride = r.modelOverride;
+      }
+      out[k] = entry;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+export function serializeHermesRegistry(reg: HermesProviderRegistry): string {
+  return `${JSON.stringify(reg, null, 2)}\n`;
+}
+
+function parseHermesModelPoint(v: unknown): HermesModelPoint | undefined {
+  if (typeof v !== "object" || v === null) return undefined;
+  const r = v as Record<string, unknown>;
+  if (
+    typeof r.id !== "string" ||
+    typeof r.model !== "string" ||
+    typeof r.base_url !== "string"
+  ) {
+    return undefined;
+  }
+  return { id: r.id, model: r.model, base_url: r.base_url };
+}
+
+/**
+ * Parse `hermes-state.json` STRICTLY (畸形 → {error}，不猜): it carries the
+ * previous token and the rollback plan, so a half-broken state must not be
+ * acted on.
+ */
+export function parseHermesStateFile(
+  text: string,
+): { state: HermesStateFile } | { error: string } {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return { error: "state 文件不是合法 JSON" };
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { error: "state 文件根不是对象" };
+  }
+  const ls = (raw as Record<string, unknown>).lastSwitch;
+  if (typeof ls !== "object" || ls === null || Array.isArray(ls)) {
+    return { error: "state 缺少 lastSwitch 对象" };
+  }
+  const r = ls as Record<string, unknown>;
+  const to = parseHermesModelPoint(r.to);
+  const from = parseHermesModelPoint(r.from);
+  if (to === undefined || from === undefined) {
+    return { error: "state lastSwitch.to/from 畸形" };
+  }
+  if (
+    typeof r.ts !== "number" ||
+    typeof r.ccName !== "string" ||
+    typeof r.configBackup !== "string"
+  ) {
+    return { error: "state lastSwitch 标量字段畸形" };
+  }
+  const env = r.env;
+  if (typeof env !== "object" || env === null || Array.isArray(env)) {
+    return { error: "state env 畸形" };
+  }
+  const e = env as Record<string, unknown>;
+  if (
+    typeof e.key !== "string" ||
+    (e.prevValue !== null && typeof e.prevValue !== "string")
+  ) {
+    return { error: "state env 畸形" };
+  }
+  const cr = r.cronRepinned;
+  if (!Array.isArray(cr)) {
+    return { error: "state cronRepinned 畸形" };
+  }
+  const cronRepinned: CronRepinTarget[] = [];
+  for (const c of cr) {
+    if (typeof c !== "object" || c === null) {
+      return { error: "state cronRepinned 条目畸形" };
+    }
+    const x = c as Record<string, unknown>;
+    if (
+      typeof x.jobId !== "string" ||
+      typeof x.prevProvider !== "string" ||
+      (x.prevModel !== null && typeof x.prevModel !== "string")
+    ) {
+      return { error: "state cronRepinned 条目畸形" };
+    }
+    cronRepinned.push({
+      jobId: x.jobId,
+      prevProvider: x.prevProvider,
+      prevModel: x.prevModel,
+    });
+  }
+  return {
+    state: {
+      lastSwitch: {
+        ts: r.ts,
+        ccName: r.ccName,
+        to,
+        from,
+        configBackup: r.configBackup,
+        env: { key: e.key, prevValue: e.prevValue },
+        cronRepinned,
+      },
+    },
+  };
+}
+
+export function serializeHermesStateFile(s: HermesStateFile): string {
+  return `${JSON.stringify(s, null, 2)}\n`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1719,6 +2384,176 @@ async function fetchProviderQuotasHttp(
 }
 
 // ---------------------------------------------------------------------------
+// hermes backend — production deps implementations
+// ---------------------------------------------------------------------------
+
+/**
+ * Production deps.runHermes: spawn `hermes <args>` with the same IO/timeout
+ * contract as runClaude (pipe stdout/stderr, SIGTERM on timeout, no stdin
+ * inheritance needed — cron edit / gateway / -z ping never read stdin).
+ */
+function runHermesProcess(
+  args: string[],
+  timeoutMs: number,
+): Promise<SpawnResult> {
+  return new Promise((resolveFn) => {
+    const child = spawn(HERMES_BIN, args, {
+      env: { ...process.env },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+    }, timeoutMs);
+
+    child.on("error", () => {
+      clearTimeout(timer);
+      resolveFn({ stdout, stderr, exitCode: null, timedOut: false });
+    });
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      resolveFn({
+        stdout,
+        stderr,
+        exitCode: code,
+        signal: signal ?? null,
+        timedOut,
+      });
+    });
+  });
+}
+
+/** Production deps.readTextFile: UTF-8 read; missing/unreadable → undefined. */
+function readTextFileFromDisk(path: string): Promise<string | undefined> {
+  return new Promise((resolvePromise) => {
+    try {
+      resolvePromise(readFileSync(path, "utf8"));
+    } catch {
+      resolvePromise(undefined);
+    }
+  });
+}
+
+/**
+ * Production deps.writeTextFileAtomic: tmp + rename (atomic on POSIX).
+ * mode 缺省时沿用目标文件现有权限，目标不存在则 0o600。Any failure →
+ * {ok:false} (never throws); the tmp file is cleaned up best-effort.
+ */
+function writeTextFileAtomicToDisk(
+  path: string,
+  text: string,
+  mode?: number,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  return new Promise((resolvePromise) => {
+    const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+    try {
+      let m = mode;
+      if (m === undefined) {
+        try {
+          m = statSync(path).mode & 0o777;
+        } catch {
+          m = 0o600;
+        }
+      }
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(tmp, text, { encoding: "utf8", mode: m });
+      renameSync(tmp, path);
+      resolvePromise({ ok: true });
+    } catch (err) {
+      try {
+        rmSync(tmp, { force: true });
+      } catch {
+        // best-effort cleanup
+      }
+      resolvePromise({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+}
+
+/** Production deps.copyFile: full-file copy (backup / whole-file restore). */
+function copyFileOnDisk(
+  src: string,
+  dest: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  return new Promise((resolvePromise) => {
+    try {
+      mkdirSync(dirname(dest), { recursive: true });
+      copyFileSync(src, dest);
+      resolvePromise({ ok: true });
+    } catch (err) {
+      resolvePromise({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+}
+
+/**
+ * Production deps.queryLastSessionModel: sqlite3 -readonly -json against
+ * HERMES_STATE_DB_PATH for the newest session_model_usage row (best-effort
+ * verification; any failure → undefined). Same spawn skeleton as
+ * readCcSwitchProvider.
+ */
+function queryLastSessionModelFromDb(): Promise<
+  { model: string; provider: string } | undefined
+> {
+  return new Promise((resolvePromise) => {
+    const sql =
+      "SELECT model, billing_provider AS provider FROM session_model_usage ORDER BY last_seen DESC LIMIT 1";
+    const child = spawn(
+      "sqlite3",
+      ["-readonly", "-json", HERMES_STATE_DB_PATH, sql],
+      {
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+
+    let stdout = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+    child.on("error", () => resolvePromise(undefined));
+    child.on("close", (code) => {
+      if (code !== 0) {
+        resolvePromise(undefined);
+        return;
+      }
+      try {
+        const parsed: unknown = JSON.parse(stdout.trim() || "[]");
+        if (!Array.isArray(parsed) || parsed.length === 0) {
+          resolvePromise(undefined);
+          return;
+        }
+        const row = parsed[0] as Record<string, unknown>;
+        if (typeof row.model !== "string" || typeof row.provider !== "string") {
+          resolvePromise(undefined);
+          return;
+        }
+        resolvePromise({ model: row.model, provider: row.provider });
+      } catch {
+        resolvePromise(undefined);
+      }
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -1726,6 +2561,7 @@ const HELP = `Usage:
   gcli [claude] [options] [-- <args>]  wrap the claude CLI (default backend)
   gcli agy [options] [-- <args>]       wrap the agy CLI (explicit subcommand)
   gcli api [options]                   call an anthropic-compatible messages API
+  gcli hermes <provider|status|rollback> [options]  hermes agent 主模型一键切换
 
 gcli sits in front of three backends and gives skills a stable entry point:
 50k-char output truncation (agy/claude; api only when non-stream), a hard
@@ -1803,6 +2639,30 @@ api backend (\`gcli api ...\`) — pure HTTP, no agent, no subprocess:
     - Unknown flags exit 2 (strict; nothing to forward to).
     - thinking is left ENABLED (k3 quality source); use a sufficient
       --max-tokens budget (default 80000) to cover thinking + text.
+
+hermes backend (\`gcli hermes ...\`) — hermes agent 主模型/provider 一键切换:
+  <provider>            cc-switch provider 名（exact/case/substring 三层匹配）;
+                        TTY 下省略则弹出选择菜单；非 TTY 省略 → exit 2 零交互
+  status                当前 model 段 + .env key 存在性 + 上次切换记录
+  rollback              切回上一个 provider（from/to 互换写回，支持来回 toggle）
+      --model <name>    覆盖模型名（自动剥 [1M] 后缀），并持久化进 registry
+      --dry-run         只输出计划：零写入零 spawn（.env 行显示 KEY=<redacted>）
+      --no-verify       跳过切换后的 hermes -z ping 验证
+      --keep-on-fail    验证/网关失败时不自动回滚（默认自动回滚）
+
+  Notes:
+    - 切换流程 = 备份 config.yaml → 改 model/providers 段（原子写）→ .env
+      upsert key（0o600）→ cron 重 pin（仅 enabled 且 pin 在旧 provider 的
+      job，单条失败 warn 继续）→ 重启网关 → hermes -z ping 验证（60s 硬门槛）
+      + state.db session_model_usage best-effort 比对。
+    - 验证或网关失败默认自动回滚整链路（config/.env/cron pin/网关）。
+    - 备份命名 config.yaml.bak-before-<id>-<epoch>，写入均 tmp+rename 原子写。
+    - registry: ~/.config/gcli/hermes-providers.json（cc-switch 名 → id/keyEnv
+      /modelOverride）；state: ~/.config/gcli/hermes-state.json（0o600，含旧
+      token 的 prevValue 供 rollback）。
+    - 输出红线：任何 stdout/stderr/dry-run 计划只打印 key 名，永不打印 token 值。
+    - 绝不修改 ~/.claude/settings.json 与 cc-switch.db（后者只读）。
+    - config.yaml 结构不认识（缺 model:/providers: 段、意外嵌套）→ 报错零写盘。
 
 Exit codes: 0 success | 1 backend error / timeout / empty output | 2 bad args
          | N (interactive mode: child's exit code passed through unchanged)`;
@@ -2277,7 +3137,8 @@ async function resolveApiProviderEnv(
     envResult.env.ANTHROPIC_MODEL ??
     envResult.env.ANTHROPIC_DEFAULT_SONNET_MODEL ??
     envResult.env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
-  const resolvedModel = rawModel?.replace(/\[[^\]]*\]$/, "");
+  const resolvedModel =
+    rawModel === undefined ? undefined : stripContextSuffix(rawModel);
   if (!baseUrl) {
     return err(1, "gcli: provider env is missing ANTHROPIC_BASE_URL");
   }
@@ -2377,6 +3238,658 @@ async function runApiBackend(
   return wrap(outcome);
 }
 
+// ---------------------------------------------------------------------------
+// hermes backend — orchestration (status / rollback / switch)
+// ---------------------------------------------------------------------------
+
+const HERMES_USAGE =
+  "gcli hermes <provider|status|rollback> [--model <m>] [--dry-run] [--no-verify] [--keep-on-fail]";
+
+function hermesFail(exitCode: number, stderr: string): RunOutcome {
+  return { exitCode, stdout: "", stderr };
+}
+
+/** Read the active (uncommented) value of KEY from a .env text, or null. */
+function envValueOf(envText: string, key: string): string | null {
+  const prefix = `${key}=`;
+  for (const line of envText.split("\n")) {
+    if (line.startsWith(prefix)) return line.slice(prefix.length);
+  }
+  return null;
+}
+
+/**
+ * `gcli hermes status`：当前 model 段 + .env key 存在性 + 上次切换记录。
+ * 无切换历史时优雅显示（exit 0）。config 不可读/不可解析 → exit 1。
+ */
+async function hermesStatus(deps: RunDeps): Promise<RunOutcome> {
+  const configText = await deps.readTextFile(HERMES_CONFIG_PATH);
+  if (configText === undefined) {
+    return hermesFail(1, "gcli: hermes: 无法读取 ~/.hermes/config.yaml");
+  }
+  const info = parseHermesConfig(configText);
+  if ("error" in info) {
+    return hermesFail(1, `gcli: hermes: ${info.error}`);
+  }
+  const provider = info.info.model.provider ?? "(unset)";
+  const model = info.info.model.default ?? "(unset)";
+  const baseUrl = info.info.model.base_url ?? "(unset)";
+
+  // .env key 存在性：按当前 provider id 反查 registry/seed 的 keyEnv
+  const regText = await deps.readTextFile(HERMES_PROVIDERS_REGISTRY_PATH);
+  const registry = regText === undefined ? {} : parseHermesRegistry(regText);
+  const known = [
+    ...Object.values(registry),
+    ...Object.values(HERMES_PROVIDER_SEEDS),
+  ];
+  const entry = known.find((e) => e.id === provider);
+  let envLine = "env_key: unknown（provider 不在 registry/seed 中）";
+  if (entry !== undefined) {
+    const envText = await deps.readTextFile(HERMES_ENV_PATH);
+    const present =
+      envText !== undefined && envValueOf(envText, entry.keyEnv) !== null;
+    envLine = `env_key: ${entry.keyEnv} ${present ? "present" : "missing"}`;
+  }
+
+  let lastLine = "last_switch: none";
+  const stateText = await deps.readTextFile(HERMES_STATE_PATH);
+  if (stateText !== undefined) {
+    const st = parseHermesStateFile(stateText);
+    if ("state" in st) {
+      const s = st.state.lastSwitch;
+      lastLine = `last_switch: ${s.from.id} -> ${s.to.id}（${s.from.model} -> ${s.to.model}）@ ${new Date(s.ts).toISOString()}`;
+    } else {
+      lastLine = "last_switch: (state file malformed)";
+    }
+  }
+
+  return {
+    exitCode: 0,
+    stdout: [
+      `provider: ${provider}`,
+      `model: ${model}`,
+      `base_url: ${baseUrl}`,
+      envLine,
+      lastLine,
+    ].join("\n"),
+    stderr: "",
+  };
+}
+
+type HermesRollbackExec = {
+  /** config+env 已恢复、网关已起、验证通过（verify=false 时不含验证）。 */
+  ok: boolean;
+  /** 回滚前对现状 config 的快照（toggle 的下一站备份）；快照失败则缺失。 */
+  snapshotPath?: string;
+  /** 回滚前 .env 里该 key 的值（toggle 写回用）。 */
+  currentEnvValue: string | null;
+};
+
+/**
+ * 回滚执行体（rollback 命令与切换失败自动回滚共用）：
+ * 快照现状 config → copyFile 整文件恢复 → .env 回写/删行 → cron 逐条回放旧
+ * pin（单条失败 warn 继续）→ 网关重启（stop 失败仅 warn，start 失败=失败）→
+ * ping 验证（可选）。全程不 throw。
+ */
+async function performHermesRollback(
+  s: HermesStateFile["lastSwitch"],
+  deps: RunDeps,
+  verify: boolean,
+  logs: string[],
+): Promise<HermesRollbackExec> {
+  let ok = true;
+  let snapshotPath: string | undefined;
+  const snap = `${HERMES_CONFIG_PATH}.bak-before-${s.from.id}-${Math.floor(Date.now() / 1000)}`;
+  const snapR = await deps.copyFile(HERMES_CONFIG_PATH, snap);
+  if (snapR.ok) {
+    snapshotPath = snap;
+  } else {
+    logs.push(
+      `gcli: hermes: rollback: warn: 现状快照失败（toggle 将不可用）: ${snapR.error}`,
+    );
+  }
+  const envText = (await deps.readTextFile(HERMES_ENV_PATH)) ?? "";
+  const currentEnvValue = envValueOf(envText, s.env.key);
+
+  const rc = await deps.copyFile(s.configBackup, HERMES_CONFIG_PATH);
+  if (!rc.ok) {
+    logs.push(
+      `gcli: hermes: rollback: 备份恢复失败（${s.configBackup}）: ${rc.error}`,
+    );
+    return { ok: false, snapshotPath, currentEnvValue };
+  }
+  logs.push("gcli: hermes: rollback: config.yaml 已整文件恢复");
+
+  const we = await deps.writeTextFileAtomic(
+    HERMES_ENV_PATH,
+    upsertEnvLines(envText, s.env.key, s.env.prevValue),
+    0o600,
+  );
+  if (!we.ok) {
+    logs.push(`gcli: hermes: rollback: .env 回写失败: ${we.error}`);
+    ok = false;
+  } else {
+    logs.push(`gcli: hermes: rollback: .env 已回写 ${s.env.key}`);
+  }
+
+  for (const c of s.cronRepinned) {
+    const args = ["cron", "edit", c.jobId, "--provider", c.prevProvider];
+    if (c.prevModel !== null) args.push("--model", c.prevModel);
+    const r = await deps.runHermes(args, DEFAULT_TIMEOUT_MS);
+    if (r.exitCode !== 0) {
+      logs.push(
+        `gcli: hermes: rollback: warn: cron edit ${c.jobId} 回放失败（继续）: ${(r.stderr || r.stdout).trim().slice(0, 200)}`,
+      );
+    } else {
+      logs.push(
+        `gcli: hermes: rollback: cron ${c.jobId} 已回 pin → ${c.prevProvider}`,
+      );
+    }
+  }
+
+  const gst = await deps.runHermes(["gateway", "stop"], DEFAULT_TIMEOUT_MS);
+  if (gst.exitCode !== 0) {
+    logs.push(
+      "gcli: hermes: rollback: warn: gateway stop 非零退出（网关可能本就没跑），继续 start",
+    );
+  }
+  const gsa = await deps.runHermes(["gateway", "start"], DEFAULT_TIMEOUT_MS);
+  if (gsa.exitCode !== 0) {
+    logs.push(
+      `gcli: hermes: rollback: gateway start 失败: ${(gsa.stderr || gsa.stdout).trim().slice(0, 300)}`,
+    );
+    ok = false;
+  } else {
+    logs.push("gcli: hermes: rollback: 网关已重启");
+  }
+
+  if (verify) {
+    const ping = await deps.runHermes(["-z", "ping"], HERMES_VERIFY_TIMEOUT_MS);
+    if (ping.timedOut === true || ping.exitCode !== 0) {
+      logs.push("gcli: hermes: rollback: 回滚后验证 ping 未通过");
+      ok = false;
+    } else {
+      logs.push("gcli: hermes: rollback: 验证 ping 通过");
+    }
+  }
+  return { ok, snapshotPath, currentEnvValue };
+}
+
+/** `gcli hermes rollback`：无 state → exit 1；畸形 → exit 1（不猜）。 */
+async function hermesRollback(
+  parsed: ParsedHermesArgs,
+  deps: RunDeps,
+): Promise<RunOutcome> {
+  const stateText = await deps.readTextFile(HERMES_STATE_PATH);
+  if (stateText === undefined) {
+    return hermesFail(
+      1,
+      "gcli: hermes: 无可回滚的切换历史 / no switch history to roll back",
+    );
+  }
+  const st = parseHermesStateFile(stateText);
+  if ("error" in st) {
+    return hermesFail(
+      1,
+      `gcli: hermes: state 文件畸形，拒绝回滚（不猜）: ${st.error}`,
+    );
+  }
+  const s = st.state.lastSwitch;
+  const logs: string[] = [
+    `gcli: hermes: 回滚 ${s.to.id}（${s.to.model}）-> ${s.from.id}（${s.from.model}）…`,
+  ];
+  const r = await performHermesRollback(s, deps, parsed.verify, logs);
+  if (!r.ok || r.snapshotPath === undefined) {
+    logs.push("gcli: hermes: 回滚未完全成功（详见上方日志）");
+    return { exitCode: 1, stdout: "", stderr: logs.join("\n") };
+  }
+  // toggle：from/to 互换写回；configBackup 指向本次快照（= 旧 to 的配置）。
+  const swapped: HermesStateFile = {
+    lastSwitch: {
+      ts: Date.now(),
+      ccName: s.ccName,
+      to: s.from,
+      from: s.to,
+      configBackup: r.snapshotPath,
+      env: { key: s.env.key, prevValue: r.currentEnvValue },
+      cronRepinned: s.cronRepinned,
+    },
+  };
+  const ws = await deps.writeTextFileAtomic(
+    HERMES_STATE_PATH,
+    serializeHermesStateFile(swapped),
+    0o600,
+  );
+  if (!ws.ok) {
+    logs.push(
+      `gcli: hermes: warn: state 写回失败（toggle 将不可用）: ${ws.error}`,
+    );
+  }
+  logs.push(`gcli: hermes: 回滚完成，当前 ${s.from.id} / ${s.from.model}`);
+  return { exitCode: 0, stdout: "", stderr: logs.join("\n") };
+}
+
+/**
+ * `gcli hermes <provider>` 一键切换（设计文档流程 0-9）。所有失败 resolve
+ * RunOutcome，禁止 throw。进度/诊断全走 stderr；stdout 仅 dry-run 计划。
+ * token 红线：任何输出只打印 key 名，token 值永不出现。
+ */
+async function hermesSwitch(
+  parsed: ParsedHermesArgs,
+  deps: RunDeps,
+): Promise<RunOutcome> {
+  const logs: string[] = [];
+
+  // 0. 目标 provider 名：位置参数，或 TTY picker；非 TTY 缺参 → exit 2 零交互
+  let ccQuery = parsed.provider;
+  if (ccQuery === undefined) {
+    if (!deps.isInteractive()) {
+      return hermesFail(
+        2,
+        `gcli: hermes 需要 provider 位置参数（或保留字 status/rollback）；非 TTY 下零交互。\nusage: ${HERMES_USAGE}`,
+      );
+    }
+    const lookup0 = await deps.readCcSwitchProvider();
+    if (!lookup0.ok) {
+      return hermesFail(1, `gcli: hermes: ${lookup0.message}`);
+    }
+    if (lookup0.providers.length === 0) {
+      return hermesFail(1, "gcli: hermes: no cc-switch providers configured");
+    }
+    const picked = await deps.pickProvider(
+      lookup0.providers.map((p) => ({ name: p.name })),
+      0,
+    );
+    if (picked.kind === "skip") {
+      return {
+        exitCode: 0,
+        stdout: "",
+        stderr: "gcli: hermes: 已取消，未切换",
+      };
+    }
+    ccQuery = picked.entry.name;
+  }
+
+  // 1. cc-switch 取 provider（复用三层匹配）
+  const lookup = await deps.readCcSwitchProvider();
+  if (!lookup.ok) {
+    return hermesFail(1, `gcli: hermes: ${lookup.message}`);
+  }
+  const match = matchProviderName(
+    ccQuery,
+    lookup.providers.map((p) => p.name),
+  );
+  if ("none" in match) {
+    return hermesFail(
+      2,
+      `gcli: hermes: provider not found / 未知 provider: ${ccQuery}`,
+    );
+  }
+  if ("ambiguous" in match) {
+    const candidates = match.ambiguous
+      .map((n) => `"${n}"`)
+      .sort()
+      .join(", ");
+    return hermesFail(2, `gcli: hermes: ambiguous provider: ${candidates}`);
+  }
+  const ccName = match.matched;
+  const target = lookup.providers.find((p) => p.name === ccName);
+  if (target === undefined) {
+    return hermesFail(2, `gcli: hermes: provider not found: ${ccQuery}`);
+  }
+  const cfgJson =
+    typeof target.settingsConfig === "string"
+      ? target.settingsConfig
+      : JSON.stringify(target.settingsConfig);
+  const envResult = extractProviderEnv(cfgJson);
+  if ("error" in envResult) {
+    return hermesFail(1, `gcli: hermes: ${envResult.error}`);
+  }
+  const penv = envResult.env;
+  const baseUrl = penv.ANTHROPIC_BASE_URL;
+  const token = penv.ANTHROPIC_AUTH_TOKEN ?? penv.ANTHROPIC_API_KEY;
+  if (baseUrl === undefined || baseUrl === "") {
+    return hermesFail(
+      1,
+      "gcli: hermes: provider env is missing ANTHROPIC_BASE_URL",
+    );
+  }
+  if (token === undefined || token === "") {
+    return hermesFail(
+      1,
+      "gcli: hermes: provider env is missing ANTHROPIC_AUTH_TOKEN（无 token）",
+    );
+  }
+  // 换行消毒：cc-switch 值将写入行级文件（.env/config.yaml），裸换行会破坏行结构
+  for (const [label, value] of [
+    ["name", ccName],
+    ["ANTHROPIC_BASE_URL", baseUrl],
+    ["token", token],
+  ] as const) {
+    if (containsLineBreak(value)) {
+      return hermesFail(
+        1,
+        `gcli: hermes: cc-switch provider ${label} 含裸换行，拒绝写入（宁报错不猜）`,
+      );
+    }
+  }
+
+  // 2. 读现状（= rollback 的 from）并验证结构
+  const configText = await deps.readTextFile(HERMES_CONFIG_PATH);
+  if (configText === undefined) {
+    return hermesFail(1, "gcli: hermes: 无法读取 ~/.hermes/config.yaml");
+  }
+  const info = parseHermesConfig(configText);
+  if ("error" in info) {
+    return hermesFail(
+      1,
+      `gcli: hermes: ${info.error} —— 无法安全解析 config.yaml，拒绝写入`,
+    );
+  }
+  const fromId = info.info.model.provider ?? "";
+  const fromModel = info.info.model.default ?? "";
+  if (fromId === "" || fromModel === "") {
+    return hermesFail(
+      1,
+      "gcli: hermes: config.yaml model 段缺 provider/default，拒绝写入",
+    );
+  }
+  const from: HermesModelPoint = {
+    id: fromId,
+    model: fromModel,
+    base_url: info.info.model.base_url ?? "",
+  };
+
+  // 3. registry 解析 hermes 字段（文件 → seed → 推导+写回）
+  const regText = await deps.readTextFile(HERMES_PROVIDERS_REGISTRY_PATH);
+  const registry: HermesProviderRegistry =
+    regText === undefined ? {} : parseHermesRegistry(regText);
+  let entry = registry[ccName] ?? HERMES_PROVIDER_SEEDS[ccName];
+  let registryDirty = false;
+  if (entry === undefined) {
+    const id = deriveHermesId(ccName);
+    if (id === "") {
+      return hermesFail(1, `gcli: hermes: 无法从 "${ccName}" 推导 provider id`);
+    }
+    if (info.info.providerIds.includes(id)) {
+      return hermesFail(
+        1,
+        `gcli: hermes: 推导 id "${id}" 与 config.yaml 已有 providers 条目冲突，拒绝覆盖；请在 ${HERMES_PROVIDERS_REGISTRY_PATH} 手工登记`,
+      );
+    }
+    entry = { id, keyEnv: deriveKeyEnv(id) };
+    registry[ccName] = entry;
+    registryDirty = true;
+  }
+
+  // 4. 模型名推导：--model > registry modelOverride > cc-switch（剥 [1M] 后缀）
+  const ccModel =
+    penv.ANTHROPIC_MODEL !== undefined
+      ? stripContextSuffix(penv.ANTHROPIC_MODEL)
+      : undefined;
+  if (parsed.model !== undefined) {
+    // --model 持久化进 registry 的 modelOverride
+    entry = { ...entry, modelOverride: parsed.model };
+    registry[ccName] = entry;
+    registryDirty = true;
+  }
+  const model = parsed.model ?? entry.modelOverride ?? ccModel;
+  if (model === undefined || model === "") {
+    return hermesFail(
+      1,
+      "gcli: hermes: no model resolved（cc-switch 无 ANTHROPIC_MODEL，可用 --model 指定）",
+    );
+  }
+  if (containsLineBreak(model)) {
+    return hermesFail(
+      1,
+      "gcli: hermes: 模型名含裸换行，拒绝写入（宁报错不猜）",
+    );
+  }
+  const to: HermesModelPoint = { id: entry.id, model, base_url: baseUrl };
+
+  // 5. 构造编辑（纯函数；结构异常 → 报错零写盘）
+  const edit: HermesConfigEdit = {
+    model: { default: model, provider: to.id, base_url: baseUrl },
+    provider: {
+      id: to.id,
+      name: ccName,
+      base_url: baseUrl,
+      transport: HERMES_TRANSPORT,
+      key_env: entry.keyEnv,
+      default_model: model,
+    },
+  };
+  const edited = editHermesConfig(configText, edit);
+  if ("error" in edited) {
+    return hermesFail(
+      1,
+      `gcli: hermes: ${edited.error} —— 无法安全识别 config.yaml 结构，拒绝写入 / refusing to write`,
+    );
+  }
+
+  // cron 重 pin 计划（读 jobs.json；读不到/畸形 → warn 跳过，不阻塞）
+  let cronPlan: CronRepinTarget[] = [];
+  let cronWarn: string | undefined;
+  const jobsText = await deps.readTextFile(HERMES_CRON_JOBS_PATH);
+  if (jobsText === undefined) {
+    cronWarn = "无法读取 cron jobs.json，跳过重 pin";
+  } else {
+    try {
+      cronPlan = buildCronRepinPlan(JSON.parse(jobsText), from.id);
+    } catch {
+      cronWarn = "cron jobs.json 不是合法 JSON，跳过重 pin";
+    }
+  }
+
+  // 6. dry-run：输出计划，零写入零 spawn（备份路径仅为预告）
+  const backupPath = `${HERMES_CONFIG_PATH}.bak-before-${to.id}-${Math.floor(Date.now() / 1000)}`;
+  if (parsed.dryRun) {
+    const planLines = [
+      "gcli hermes 切换计划（dry-run，未做任何写入）:",
+      `  provider: ${to.id}（cc-switch: ${ccName}）`,
+      `  model: ${model}`,
+      `  base_url: ${baseUrl}`,
+      `  backup: ${backupPath}`,
+      `  config.yaml: model.default=${model} model.provider=${to.id} model.base_url=${baseUrl}; providers upsert ${to.id}`,
+      `  .env: upsert ${entry.keyEnv}=<redacted>`,
+      `  cron: repin ${cronPlan.length} job(s) ${from.id} -> ${to.id}${cronPlan.length > 0 ? `（${cronPlan.map((c) => c.jobId).join(", ")}）` : ""}`,
+      "  gateway: hermes gateway stop && hermes gateway start",
+      `  verify: ${parsed.verify ? `hermes -z ping（${HERMES_VERIFY_TIMEOUT_MS}ms 超时）+ state.db best-effort 比对` : "已跳过（--no-verify）"}`,
+    ];
+    if (cronWarn !== undefined) planLines.push(`  warn: ${cronWarn}`);
+    return { exitCode: 0, stdout: planLines.join("\n"), stderr: "" };
+  }
+
+  // 7. registry 写回（推导/modelOverride 持久化；best-effort）
+  if (registryDirty) {
+    const w = await deps.writeTextFileAtomic(
+      HERMES_PROVIDERS_REGISTRY_PATH,
+      serializeHermesRegistry(registry),
+    );
+    if (!w.ok) {
+      logs.push(
+        `gcli: hermes: warn: registry 写回失败（不影响本次切换）: ${w.error}`,
+      );
+    }
+  }
+
+  // 8. 备份先行 → 原子写 config
+  const bak = await deps.copyFile(HERMES_CONFIG_PATH, backupPath);
+  if (!bak.ok) {
+    return hermesFail(
+      1,
+      `gcli: hermes: 备份失败，中止切换（未写入任何内容）: ${bak.error}`,
+    );
+  }
+  logs.push(`gcli: hermes: 已备份 config.yaml → ${backupPath}`);
+  const wc = await deps.writeTextFileAtomic(HERMES_CONFIG_PATH, edited.text);
+  if (!wc.ok) {
+    return hermesFail(
+      1,
+      `gcli: hermes: config.yaml 写入失败（备份在 ${backupPath}）: ${wc.error}`,
+    );
+  }
+  logs.push(`gcli: hermes: config.yaml 已切换到 ${to.id} / ${model}`);
+
+  // 9. .env upsert（保持 0o600；失败则从备份恢复 config 避免半切换态）
+  const envText = (await deps.readTextFile(HERMES_ENV_PATH)) ?? "";
+  const prevValue = envValueOf(envText, entry.keyEnv);
+  const we = await deps.writeTextFileAtomic(
+    HERMES_ENV_PATH,
+    upsertEnvLines(envText, entry.keyEnv, token),
+    0o600,
+  );
+  if (!we.ok) {
+    await deps.copyFile(backupPath, HERMES_CONFIG_PATH);
+    return hermesFail(
+      1,
+      `gcli: hermes: .env 写入失败，已从备份恢复 config.yaml: ${we.error}`,
+    );
+  }
+  logs.push(`gcli: hermes: .env 已 upsert ${entry.keyEnv}=<redacted>`);
+
+  // 10. cron 重 pin（单条失败 warn 继续，不触发回滚）
+  const cronRepinned: CronRepinTarget[] = [];
+  if (cronWarn !== undefined) {
+    logs.push(`gcli: hermes: warn: ${cronWarn}`);
+  }
+  for (const c of cronPlan) {
+    cronRepinned.push(c);
+    const r = await deps.runHermes(
+      ["cron", "edit", c.jobId, "--provider", to.id, "--model", model],
+      DEFAULT_TIMEOUT_MS,
+    );
+    if (r.exitCode !== 0) {
+      logs.push(
+        `gcli: hermes: warn: cron edit ${c.jobId} 失败（继续，不触发回滚）: ${(r.stderr || r.stdout).trim().slice(0, 200)}`,
+      );
+    } else {
+      logs.push(`gcli: hermes: cron ${c.jobId} 重 pin → ${to.id}`);
+    }
+  }
+
+  // 11. 网关重启（stop 失败仅 warn；start 失败 = 网关失败）
+  let gatewayFailed: string | undefined;
+  const gst = await deps.runHermes(["gateway", "stop"], DEFAULT_TIMEOUT_MS);
+  if (gst.exitCode !== 0) {
+    logs.push(
+      "gcli: hermes: warn: gateway stop 非零退出（网关可能本就没跑），继续 start",
+    );
+  }
+  const gsa = await deps.runHermes(["gateway", "start"], DEFAULT_TIMEOUT_MS);
+  if (gsa.exitCode !== 0) {
+    gatewayFailed = `hermes gateway start 失败: ${(gsa.stderr || gsa.stdout).trim().slice(0, 300)}`;
+    logs.push(`gcli: hermes: ${gatewayFailed}`);
+  } else {
+    logs.push("gcli: hermes: 网关已重启");
+  }
+
+  // 12. 验证：(a) ping 硬门槛；(b) state.db 比对 best-effort（不一致仅 warn）
+  let verifyFailed: string | undefined;
+  if (parsed.verify) {
+    const ping = await deps.runHermes(["-z", "ping"], HERMES_VERIFY_TIMEOUT_MS);
+    if (ping.timedOut === true) {
+      verifyFailed = `hermes -z ping 超时（${HERMES_VERIFY_TIMEOUT_MS}ms）`;
+    } else if (ping.exitCode !== 0) {
+      verifyFailed = `hermes -z ping 退出码 ${ping.exitCode}: ${(ping.stderr || ping.stdout).trim().slice(0, 300)}`;
+    } else {
+      logs.push("gcli: hermes: 验证 ping 通过");
+    }
+    if (verifyFailed === undefined) {
+      const last = await deps.queryLastSessionModel();
+      if (last === undefined) {
+        logs.push(
+          "gcli: hermes: warn: state.db 比对不可用（best-effort，跳过）",
+        );
+      } else if (last.provider !== to.id) {
+        logs.push(
+          `gcli: hermes: warn: state.db 最新 session 的 billing_provider=${last.provider}（期望 ${to.id}）——请人工复核`,
+        );
+      }
+    }
+  } else {
+    logs.push("gcli: hermes: 已跳过验证（--no-verify）");
+  }
+
+  const stateRecord: HermesStateFile = {
+    lastSwitch: {
+      ts: Date.now(),
+      ccName,
+      to,
+      from,
+      configBackup: backupPath,
+      env: { key: entry.keyEnv, prevValue },
+      cronRepinned,
+    },
+  };
+
+  // 13. 失败 → 默认自动回滚（--keep-on-fail 抑制，但仍写 state 以便手动 rollback）
+  const failedReason = gatewayFailed ?? verifyFailed;
+  if (failedReason !== undefined) {
+    logs.push(
+      `gcli: hermes: 切换验证失败 / verification failed: ${failedReason}`,
+    );
+    const ws = await deps.writeTextFileAtomic(
+      HERMES_STATE_PATH,
+      serializeHermesStateFile(stateRecord),
+      0o600,
+    );
+    if (!ws.ok) {
+      logs.push(`gcli: hermes: warn: state 文件写入失败: ${ws.error}`);
+    }
+    if (parsed.keepOnFail) {
+      logs.push(
+        "gcli: hermes: --keep-on-fail 生效，保留现场（可 gcli hermes rollback 手动回滚）",
+      );
+      return { exitCode: 1, stdout: "", stderr: logs.join("\n") };
+    }
+    logs.push("gcli: hermes: 开始自动回滚…");
+    const rb = await performHermesRollback(
+      stateRecord.lastSwitch,
+      deps,
+      parsed.verify,
+      logs,
+    );
+    logs.push(
+      rb.ok
+        ? "gcli: hermes: 验证失败，已自动回滚 / rolled back"
+        : "gcli: hermes: 自动回滚未完全成功，请检查现场（备份文件仍在）",
+    );
+    return { exitCode: 1, stdout: "", stderr: logs.join("\n") };
+  }
+
+  // 14. 成功 → 写 state（best-effort；失败仅 warn，切换本身已成功）
+  const ws = await deps.writeTextFileAtomic(
+    HERMES_STATE_PATH,
+    serializeHermesStateFile(stateRecord),
+    0o600,
+  );
+  if (!ws.ok) {
+    logs.push(
+      `gcli: hermes: warn: state 文件写入失败（rollback 将不可用）: ${ws.error}`,
+    );
+  }
+  logs.push(`gcli: hermes: 切换完成 ${from.id} -> ${to.id}（${model}）`);
+  return { exitCode: 0, stdout: "", stderr: logs.join("\n") };
+}
+
+/** hermes 子命令入口：status / rollback / switch 三分支。 */
+async function runHermesBackend(
+  parsed: ParsedHermesArgs,
+  deps: RunDeps,
+): Promise<RunOutcome> {
+  if (
+    parsed.provider !== undefined &&
+    HERMES_RESERVED_WORDS.has(parsed.provider)
+  ) {
+    return parsed.provider === "status"
+      ? hermesStatus(deps)
+      : hermesRollback(parsed, deps);
+  }
+  return hermesSwitch(parsed, deps);
+}
+
 /**
  * Route argv to the agy / claude / api backend via injectable deps (C1/C2).
  * Returns a {exitCode, stdout, stderr} outcome; main() owns process.exit.
@@ -2395,6 +3908,16 @@ export async function run(argv: string[], deps: RunDeps): Promise<RunOutcome> {
       return { exitCode: 0, stdout: HELP, stderr: "" };
     }
     return runApiBackend(parsed, deps);
+  }
+  if (sub.subcommand === "hermes") {
+    const parsed = parseHermesArgs(sub.rest);
+    if ("error" in parsed) {
+      return { exitCode: 2, stdout: "", stderr: `gcli: ${parsed.error}` };
+    }
+    if (parsed.help) {
+      return { exitCode: 0, stdout: HELP, stderr: "" };
+    }
+    return runHermesBackend(parsed, deps);
   }
   const parsed = parseCliArgs(sub.rest);
   if (!isOk(parsed)) {
@@ -2426,6 +3949,13 @@ async function main(): Promise<void> {
     fetchProviderQuotas: (items) => fetchProviderQuotasHttp(items),
     readLastProvider: () => readLastProviderFromDisk(),
     writeLastProvider: (name) => writeLastProviderToDisk(name),
+    runHermes: (args, timeoutMs) =>
+      runHermesProcess(args, timeoutMs ?? DEFAULT_TIMEOUT_MS),
+    readTextFile: (path) => readTextFileFromDisk(path),
+    writeTextFileAtomic: (path, text, mode) =>
+      writeTextFileAtomicToDisk(path, text, mode),
+    copyFile: (src, dest) => copyFileOnDisk(src, dest),
+    queryLastSessionModel: () => queryLastSessionModelFromDb(),
   };
   const r = await run(process.argv.slice(2), deps);
   if (r.stdout) process.stdout.write(`${r.stdout}\n`);

@@ -7,7 +7,7 @@
 ```
 packages/
   cli/       主壳 @honeydo/cli：零依赖 dispatcher，spawn 兄弟包 dist 入口并透传退出码
-  gcli/      LLM 对话（claude/agy/api 三后端，cc-switch 可选 provider 源）；bin gcli
+  gcli/      LLM 对话（claude/agy/api/hermes 四后端，cc-switch 可选 provider 源；hermes = hermes agent 模型/provider 一键切换器）；bin gcli
   qwen/      本地 OpenAI 兼容端点（ask/vision/models/status）；bin qwen（deprecated）
   lmedia/    本地图/视/音生成（node 壳 + python/ 推理脚本，外部栈目录供 venv）；bin lmedia
   doubao/    云端生图（火山方舟，模型 fallback 链）；bin doubao
@@ -27,7 +27,7 @@ packages/
 
 ```bash
 npm run build       # 全部包
-npm test            # 全部测试（gcli 271 + lmedia 50 + doubao 12 + minimax 16；qwen 无单测）
+npm test            # 全部测试（gcli 377 + lmedia 50 + doubao 12 + minimax 16；qwen 无单测）
 npm run typecheck   # tsc --noEmit 全部
 npm run lint        # biome（仅 packages/gcli、packages/cli 作用域）
 ```
@@ -35,5 +35,5 @@ npm run lint        # biome（仅 packages/gcli、packages/cli 作用域）
 ## 边界
 
 - lmedia 的推理栈（venv + 权重）在仓外，`LMEDIA_RUNTIME` 指定；仓内只有 node 壳 + python 驱动脚本
-- gcli 不写 `~/.claude/settings.json`；provider token 走子进程 argv（README 安全节已说明）
+- gcli 不写 `~/.claude/settings.json`；provider token 走子进程 argv（README 安全节已说明）。例外：`gcli hermes` 子命令是 hermes agent（`~/.hermes/`）的切换器，会改写 `~/.hermes/config.yaml` + `.env`（原子写 + 自动回滚；cc-switch.db 仍只读）
 - 别在能力包里加对兄弟包的 import——保持各自独立可拆
