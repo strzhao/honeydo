@@ -34,8 +34,17 @@ export interface AudioRuntime {
   pythonDir: string;   // CLI 自带 python 驱动目录（与 Runtime.pythonDir 同源）
 }
 
-/** 栈目录候选路径（不校验存在性；setup 可据此创建） */
-function rootCandidate(): string {
+/** 图像模态的两个快照 repo（与 resolveRuntime 同源；供 doctor / 能力开关探针复用，避免两处漂移） */
+export const IMAGE_SNAPSHOT_REPOS = ['Qwen/Qwen-Image-2512', 'Qwen/Qwen-Image-Edit-2511'] as const;
+
+/** 图像快照解析基准目录。**故意只认 homedir、不吃 HF_HUB_CACHE**——引擎实际加载路径就是这么硬编码的，
+ *  探针若吃 env 就会与真实加载路径不一致（hfHubCache() 只服务 sfx，是另一条线）。 */
+export function imageHubDir(): string {
+  return path.join(os.homedir(), '.cache', 'huggingface', 'hub');
+}
+
+/** 栈目录候选路径（不校验存在性；setup 可据此创建）。导出供 imagePreflight 在 resolveRuntime 抛错时仍能报路径 */
+export function resolveRuntimeRoot(): string {
   const home = os.homedir();
   let root = process.env.LMEDIA_RUNTIME ?? '';
   if (!root) {
@@ -59,7 +68,7 @@ function pythonDriverDir(): string {
 }
 
 export function resolveVideoRuntime(): VideoRuntime {
-  const root = rootCandidate();
+  const root = resolveRuntimeRoot();
   return {
     root,
     venvVideo: path.join(root, '.venv-video'),
@@ -72,7 +81,7 @@ export function resolveVideoRuntime(): VideoRuntime {
 }
 
 export function resolveAudioRuntime(): AudioRuntime {
-  const root = rootCandidate();
+  const root = resolveRuntimeRoot();
   return {
     root,
     pythonAudio: path.join(root, '.venv-audio', 'bin', 'python'),
@@ -96,14 +105,14 @@ export function hfSnapshot(repo: string): string | null {
 }
 
 export function resolveRuntime(): Runtime {
-  const root = rootCandidate();
+  const root = resolveRuntimeRoot();
   if (!fs.existsSync(root)) {
     throw new Error(
       `运行时未找到: ${root}\n` +
       `请设置 LMEDIA_RUNTIME 指向本地生成栈目录（含 .venv/.venv-train），或创建软链: mkdir -p ~/.lmedia && ln -s <栈目录> ~/.lmedia/runtime`
     );
   }
-  const hf = path.join(os.homedir(), '.cache', 'huggingface', 'hub');
+  const hf = imageHubDir();
   const snapOf = (repo: string) => {
     const modelDir = path.join(hf, `models--${repo.replace('/', '--')}`);
     const dir = path.join(modelDir, 'snapshots');
@@ -122,8 +131,8 @@ export function resolveRuntime(): Runtime {
     root,
     pythonGen: path.join(root, '.venv-train', 'bin', 'python'),
     pythonFast: path.join(root, '.venv', 'bin', 'python'),
-    snapshot: snapOf('Qwen/Qwen-Image-2512'),
-    snapshotEdit: snapOf('Qwen/Qwen-Image-Edit-2511'),
+    snapshot: snapOf(IMAGE_SNAPSHOT_REPOS[0]),
+    snapshotEdit: snapOf(IMAGE_SNAPSHOT_REPOS[1]),
     pythonDir: pythonDriverDir(),
   };
 }

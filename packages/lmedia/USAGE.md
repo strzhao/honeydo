@@ -92,6 +92,11 @@ lmedia lora add mimi ./mimi.safetensors --kind character --trigger "mimi_cat 橘
 # 常驻 daemon（模型加载一次，gen/edit/upscale 免每次 ~2min 冷加载；2026-08-29 加入）
 lmedia image serve start --mode edit --wait   # 预加载（不 --wait 立即返回，加载期任务自动排队）
 lmedia image serve status                     # 两模式状态；stop 停止（--mode gen 或缺省全部）
+
+# 能力开关（清理磁盘/暂不使用图像时用；详见「图像能力开关」一节）
+lmedia image status                     # 开关 + 资产在位情况
+lmedia image disable --reason "磁盘不足"  # 拦下 gen/edit/upscale/serve start（enable/status/serve stop 始终可用）
+lmedia image enable                     # 恢复；资产缺失时列出重下指引
 # 默认无需手动管理：gen/edit 首次调用自动拉起，空闲 30min 自动退出（--idle-timeout 可调）；
 # 跑批免冷加载、`--no-daemon` 强制冷路径排障；一个实例只载一条管线（gen+edit 双驻 ~110GB 超内存，
 # 切换用 `serve start --mode X --swap`）
@@ -114,7 +119,7 @@ lmedia doctor
 
 - **栈目录解析优先级**：`LMEDIA_RUNTIME` env > `~/.lmedia/runtime` 软链 > 默认 `~/ml/lb-local-gen`
 - 栈目录内含：`.venv`（mflux Q8 遗留）+ `.venv-train`（diffusers bf16 推理/训练，主力）+ `.venv-video`（mmh3turbo，MiniMax-H3 MLX 引擎）
-- 模型缓存在系统级 `~/.cache/huggingface`（Qwen-Image-2512 / Qwen-Image-Edit-2511，~150GB，勿删；2509 旧缓存确认不用后可手动删；另有 mmh3turbo-bundles ~33GB）
+- 模型缓存在系统级 `~/.cache/huggingface`（Qwen-Image-2512 / Qwen-Image-Edit-2511，~108GB。**默认可删但别直接 rm**——先 `lmedia image disable` 再删，见下方「图像能力开关」；2509 旧缓存确认不用后可手动删；另有 mmh3turbo-bundles ~33GB）
 - Lightning 蒸馏 LoRA 在栈目录 `loras/`（8 步默认 + 4 步极速，--fast 自动注入）
 - LoRA 注册表 `~/.config/limg/loras.json`：三项字段语义——`kind`（style 画风 / character 角色 / speed 加速）、`trigger`（prompt 自动注入）、`defaultWeight`（`lightning` 旧条目为 mflux 遗留，已废弃）
 - **音效库根解析优先级**：`--lib` flag > `LMEDIA_SFX_LIB` env > 默认 `~/.config/limg/sfx-library/`；库根内 `index.json` 是唯一清单（SSOT，snake_case 字段），`sfx/`、`ambient/` 放入库规范产物（44.1kHz mono 160k mp3，ffmpeg 转码，原件保留在用户手中）
@@ -122,6 +127,25 @@ lmedia doctor
 - **音效 venv**：栈目录 `.venv-audio`（`lmedia sfx setup` 幂等创建）；音效模态自检走 `lmedia sfx doctor`（独立退出码），全局 `doctor` 的 `[sfx]` 段仅展示不参与退出码
 - **daemon（常驻推理）**：状态目录 `~/.lmedia/serve/`（`<mode>.sock/.json/.log`）；gen/edit 自动拉起、upscale 只搭便车（daemon 不在直接冷路径，spandrel 秒级）；任务串行（GPU 铁律）；任务中客户端断连则服务端照常算完（产物落盘由调用方兜底）；LoRA 按任务热切换（adapter 缓存上限 4）；快照升级/切 LMEDIA_RUNTIME 后需 `serve stop` 重启才会用新权重
 - **视频加速档产物**：`~/.cache/mmh3turbo/dit-turbo.bin/.idx`（蒸馏 LoRA 合并后的 int8 bundle，`--fast` 专用）；蒸馏 LoRA 原件在 `~/.cache/mmh3turbo/loras/`；文本塔分词器在 HF 缓存 `models--MiniMaxAI--MiniMax-H3/snapshots/*/FL2VA/tokenizer/tokenizer.json`（首次 turbo-merge/gen 前需就位）
+
+## 图像能力开关（`lmedia image disable|enable|status`，2026-09-13 加入）
+
+清理磁盘时用：**先禁用在删权重**，否则 `image gen` 只会抛「模型未下载」这类晦涩错误，`doctor` 也会因图像段恒 ✗ 而永远 exit 1。
+
+```bash
+lmedia image status                       # 开关状态 + 各本位资产在位情况（0=可跑图像命令，其余为 1）
+lmedia image disable --reason "磁盘不足"   # 拦下 gen/edit/upscale/serve start；daemon 在跑则先停（正忙则拒绝）
+lmedia image enable                       # 重新开启；权重/venv 缺失时列出缺口与重下指引（exit 1）
+```
+
+- **状态文件** `~/.config/limg/image-state.json`（原子写）；`LMEDIA_IMAGE_STATE` 可覆盖路径（多栈/测试隔离）
+- **被拦的只有** `gen` / `edit` / `upscale` / `serve start`；`enable`、`disable`、`status`、`serve stop`、`serve status`、`--help` **始终可用**（否则无法自救）
+- 被拦时退出码 **1**（环境/状态类），文案含恢复路径与云端替代 `honeydo image gen "<prompt>" --engine doubao`
+- **fail-closed**：状态文件损坏 → 拒绝执行并给出两条修复路径（`lmedia image enable` 覆盖重写 / `rm` 回到默认启用）。不猜——开关若会被自己的文件损坏击败就不叫开关
+- **逃生口** `LMEDIA_NO_IMAGE_GATE=1` 绕过 gate（权重已恢复但暂不想改状态时用），会打一行告警
+- **`doctor` 三态**：禁用 → 图像段打 `·` 跳过、`imageOk` 保持 true（**不再恒 exit 1**）；状态损坏，或未禁用而资产缺失 → 照旧 ✗ + exit 1（不掩盖真实故障）
+- **删权重前的硬性前提**：`lmedia image serve status` 确认无 daemon 在跑——进程持有已删权重的文件句柄时，`rm` 不释放空间（`disable` 已自动停空闲 daemon，正忙会拒绝并指路）
+- **本机现状（2026-09-13）**：已禁用，权重/venv/`loras/`/`lora-out/` 已清理（释放 121GB）。`image enable` 会提示需重新下载 ~108GB。`loras.json` 注册表保留（6 条全悬空，重下同名文件后自动恢复有效）；`lb-local-gen/lora-data/`（72MB 训练数据）保留以便重训角色/风格 LoRA
 
 ## 绘本插画生产配方 v3（2026-08-28 验收通过，「淡空平」画风）
 
@@ -200,6 +224,10 @@ lmedia image edit "保持参考图中的角色外观完全一致（{完整锚点
 | mflux 挂 LoRA 无效果 | mflux 不吃 diffusers/peft 格式 LoRA（静默失败）→ 用 diffusers 路径（CLI 的 gen 就是；快速档也已迁到 diffusers `--fast`） |
 | 生图变慢 2 倍+ | GPU 被另一个任务占着（训练/并发生图/大文件下载抢盘）——本机 GPU 任务是串行的，别并行 |
 | daemon 行为异常（任务挂起/状态残留） | `lmedia image serve stop && lmedia image serve start --mode X --wait` 重启；现场日志 `tail -50 ~/.lmedia/serve/<mode>.log`；被 `pkill -9` 留下的死 socket 会自愈（下次 start 自动清理重绑） |
+| 图像命令报「图像能力已禁用」 | 能力开关关着（或状态文件损坏）→ `lmedia image status` 看三态；开回来 `lmedia image enable`；临时绕过 `LMEDIA_NO_IMAGE_GATE=1`（会告警） |
+| `image enable` 后 gen 仍报「模型未下载」 | 权重确实不在磁盘上（enable 只改开关、不下载）→ 按 enable 输出的 `hf download` 指引重下 ~108GB，或继续用云端 `honeydo image gen --engine doubao` |
+| `doctor` 报「能力状态文件损坏」 | `~/.config/limg/image-state.json` 被外部改坏（写入是原子写，损坏必来自人手/别的工具）→ `lmedia image enable` 覆盖重写，或 `rm` 该文件回到默认启用 |
+| 删了权重但磁盘没释放 | daemon 还攥着文件句柄 → `lmedia image serve status` 确认无进程后重试（`lmedia image disable` 会自动停空闲 daemon） |
 | daemon 报「连接中断（任务结果未知）」 | daemon 在任务中死掉/被 stop——客户端故意不自动重跑（防 40min 任务重复）；产物可能已落盘，重试前先查输出文件 |
 | gen/edit 首次调用突然多等 2 分钟 | 那是 daemon 在自动拉起加载模型（stderr 有提示）；之后同管线任务免加载。不想要 daemon：`--no-daemon` 或 `LMEDIA_NO_DAEMON=1` |
 | 外部脚本的 GPU 占用检查失效（pgrep gen/edit.py 查不到） | daemon 进程名是 `serve.py`，且 busy 才占 GPU——防御检查应改用 `lmedia image serve status`（busy=true 即占用）；走 lmedia CLI 的任务自带 waitGpuIdle 排队，不会抢 |
@@ -276,5 +304,5 @@ brew install ffmpeg                # mp4 封装必需（若已装跳过）
 
 ## 维护
 
-- 源码：`~/workspace/lmedia-cli`；改动后 `npm run build && npm link`
+- 源码：`~/workspace/honeydo/packages/lmedia`；改动后 `npm run build && npm link`
 - 实测知识与排障实录沉淀在 little-bee memory：`m4max-local-image-gen-stack`

@@ -8,7 +8,7 @@
 
 | 子树 | 状态 | 能力 |
 |------|------|------|
-| `lmedia image` | ✅ 就绪 | 文生图（Qwen-Image-2512 bf16 + true CFG + LoRA 叠加）、参考图编辑（Qwen-Image-Edit-2511，角色一致性最强路径）、Lightning 蒸馏快速档（`--fast`）、批量出图（`--num`）、Real-ESRGAN 超分 |
+| `lmedia image` | ⏸ 已禁用 | 文生图（Qwen-Image-2512 bf16 + true CFG + LoRA 叠加）、参考图编辑（Qwen-Image-Edit-2511，角色一致性最强路径）、Lightning 蒸馏快速档（`--fast`）、批量出图（`--num`）、Real-ESRGAN 超分。**本机 2026-09-13 起禁用并清理权重（释放 121GB）**：`lmedia image status` 看状态，`lmedia image enable` 恢复（需重下 ~108GB）；开关设计见 USAGE.md「图像能力开关」 |
 | `lmedia video` | ✅ 就绪 | 文生视频 + 首帧图生视频（本地 MiniMax-H3 开源权重 / mmh3turbo MLX 引擎，768p 上限，mp4 含原生立体声，零 API 成本）；`--fast` Lightning few-step 蒸馏加速档（社区 turbo LoRA 离线合并进 int8 bundle，4 步 3× / 8 步 1.5×） |
 | `lmedia sfx` | ✅ 就绪 | 音效产线（Dasheng-AudioGen 本地）：单条/批量生成（质量门+掷样选优）、剪裁/重剪、响度归一、量化验收、A/B 试听页、SSOT 音效库（入库/对账） |
 | `lmedia lora` | ✅ | LoRA 注册表（风格/角色/加速三类，含触发词与默认权重） |
@@ -17,7 +17,7 @@
 ## 安装
 
 ```bash
-cd ~/workspace/lmedia-cli && npm install && npm run build && npm link
+cd ~/workspace/honeydo/packages/lmedia && npm install && npm run build && npm link
 ```
 
 前置：本地生成栈目录（默认 `~/ml/lb-local-gen`，含 `.venv`/`.venv-train` 两个 Python venv 与 HF 模型缓存；音效另需 `.venv-audio`，`lmedia sfx setup` 可自动建）。自定义位置：`export LMEDIA_RUNTIME=<栈目录>` 或 `ln -s <栈目录> ~/.lmedia/runtime`。

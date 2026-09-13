@@ -15,7 +15,30 @@ import {
   type JobKind,
   type ServeMode,
 } from '../lib/serve.js';
+import { assertImageEnabled, ImageDisabledError } from '../lib/image-state.js';
 import { registerServe } from './serve.js';
+import { registerImageCapability } from './image-capability.js';
+
+/** 被 gate 拦截的叶子命令全路径（显式白名单，避免 'image gen' 与 'image serve start' 混淆） */
+const IMAGE_GATED = new Set<string>(['image gen', 'image edit', 'image upscale', 'image serve start']);
+
+/** 叶子命令全路径：'image gen' / 'image serve start'（顶层 program 无 parent，不计入） */
+function commandPath(cmd: Command): string {
+  const parts: string[] = [];
+  for (let c: Command | null = cmd; c && c.parent; c = c.parent) parts.unshift(c.name());
+  return parts.join(' ');
+}
+
+/** 能力开关的统一失败出口：仓库惯例是显式 process.exit，不用 uncaught 堆栈 */
+function gateImage(what: string): void {
+  try {
+    assertImageEnabled(what);
+  } catch (e) {
+    if (!(e instanceof ImageDisabledError)) throw e;
+    console.error(`✗ ${e.message}`);
+    process.exit(1);
+  }
+}
 
 /** Qwen-Image-2512 官方推荐负向模板（--neg 可覆盖；--cfg<=1 关闭引导时不下发） */
 const DEFAULT_NEG =
@@ -38,6 +61,8 @@ async function runImageJob(
   rt: Runtime,
   args: { kind: JobKind; daemonModes: ServeMode[]; script: string; payload: Record<string, unknown>; noDaemon?: boolean }
 ): Promise<PyResult> {
+  // 兜底 gate：hook 已拦叶子命令，这里保证未来新增调用点也不会绕过能力开关
+  gateImage(`image ${args.kind}`);
   if (!args.noDaemon && process.env.LMEDIA_NO_DAEMON !== '1') {
     for (const mode of args.daemonModes) {
       const r = await requestJob(mode, { kind: args.kind, ...args.payload });
@@ -277,9 +302,16 @@ function registerUpscale(image: Command): void {
 }
 
 export function registerImage(program: Command): void {
-  const image = program.command('image').description('图像生产能力（文生图/参考图编辑/超分/常驻 daemon）');
+  const image = program.command('image').description('图像生产能力（文生图/参考图编辑/超分/常驻 daemon；开关见 image disable|enable|status）');
+  // 能力开关 gate：commander 的 preAction 钩子挂在父命令上、对全部后代叶子生效，
+  // 且必然早于 action（含 resolveRuntime / LoRA 解析 / daemon 探测）；--help 与裸 `lmedia image` 不受影响。
+  image.hook('preAction', (_thisCommand, actionCommand) => {
+    const p = commandPath(actionCommand);
+    if (IMAGE_GATED.has(p)) gateImage(p);
+  });
   registerGen(image);
   registerEdit(image);
   registerUpscale(image);
   registerServe(image);
+  registerImageCapability(image);
 }
