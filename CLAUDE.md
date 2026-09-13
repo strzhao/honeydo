@@ -27,7 +27,7 @@ packages/
 
 ```bash
 npm run build       # 全部包
-npm test            # 全部测试（gcli 377 + lmedia 50 + doubao 12 + minimax 16；qwen 无单测）
+npm test            # 全部测试（gcli 377 + lmedia 64 + doubao 12 + minimax 16；qwen 无单测）
 npm run typecheck   # tsc --noEmit 全部
 npm run lint        # biome（仅 packages/gcli、packages/cli 作用域）
 ```

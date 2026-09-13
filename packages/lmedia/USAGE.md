@@ -78,6 +78,12 @@ lmedia image upscale in.png out.png --size 2730x1535
 # 视频生成（本地 MiniMax-H3 / mmh3turbo；首次用前先 lmedia video setup）
 lmedia video gen "水彩绘本风格：小蜜蜂男孩在花园里挥手，花瓣缓缓飘落，镜头缓慢推近，细节丰富" -r 480p -o scene.mp4
 lmedia video gen "角色轻轻挥手" --first-frame page.png -r 352p -o page-motion.mp4   # 绘本页微动（图生视频）
+lmedia video gen "角色轻轻挥手" --last-frame end.png -r 352p -o page-swing.mp4      # 首尾双锚点插值
+
+# Lightning 加速档（few-step 蒸馏；首次先跑一次 turbo-merge，详见下方「Lightning 加速档」）
+lmedia video turbo-merge                        # 蒸馏 LoRA → int8 bundle（一次性，~10 分钟/40GB 读写）
+lmedia video gen "爸爸抱着宝宝俯身去摸小草，宝宝伸手轻碰，绿叶轻晃，镜头极缓慢推近。Audio: soft garden breeze, leaves rustling, no talking" \
+  --fast -r square --seconds 4 --first-frame photo.jpg -o clip.mp4   # 默认 8 步 + shift 6（4 步档 3× 提速、8 步档 1.5×）
 
 # LoRA 注册表
 lmedia lora list
@@ -115,6 +121,7 @@ lmedia doctor
 - **音效清单损坏防护**：`index.json` 为空/非法 JSON 时报「清单损坏」exit 1，**绝不静默重建**（与 lora 注册表首跑自动播种不同，防丢账）；批量清单 `-m` 同语义（不存在=2，存在但内容坏=1）
 - **音效 venv**：栈目录 `.venv-audio`（`lmedia sfx setup` 幂等创建）；音效模态自检走 `lmedia sfx doctor`（独立退出码），全局 `doctor` 的 `[sfx]` 段仅展示不参与退出码
 - **daemon（常驻推理）**：状态目录 `~/.lmedia/serve/`（`<mode>.sock/.json/.log`）；gen/edit 自动拉起、upscale 只搭便车（daemon 不在直接冷路径，spandrel 秒级）；任务串行（GPU 铁律）；任务中客户端断连则服务端照常算完（产物落盘由调用方兜底）；LoRA 按任务热切换（adapter 缓存上限 4）；快照升级/切 LMEDIA_RUNTIME 后需 `serve stop` 重启才会用新权重
+- **视频加速档产物**：`~/.cache/mmh3turbo/dit-turbo.bin/.idx`（蒸馏 LoRA 合并后的 int8 bundle，`--fast` 专用）；蒸馏 LoRA 原件在 `~/.cache/mmh3turbo/loras/`；文本塔分词器在 HF 缓存 `models--MiniMaxAI--MiniMax-H3/snapshots/*/FL2VA/tokenizer/tokenizer.json`（首次 turbo-merge/gen 前需就位）
 
 ## 绘本插画生产配方 v3（2026-08-28 验收通过，「淡空平」画风）
 
@@ -171,6 +178,9 @@ lmedia image edit "保持参考图中的角色外观完全一致（{完整锚点
 | 视频 352p / 5s / 12 步 | ~3-6min（预估*） | MiniMax-H3 mmh3turbo；草稿试错档 |
 | 视频 480p / 5s / 12 步 | ~6-10min（预估*） | 默认档 |
 | 视频 720p / 5s / 12 步 | ~29-45min（预估*） | 成品档（1280×704） |
+| `--fast` 蒸馏 8 步 · square 768² · 4s | ~17min 实测 | 身份稳定档（含 ~2min 冷加载；LightX2V Studio 同款 LoRA） |
+| `--fast` 蒸馏 4 步 · square 768² · 4s | ~6min 实测 | 草稿档；人物视频尾段有身份漂移 |
+| `--fast` 蒸馏 4 步 · 352p · 2s | ~2min 实测 | 仅链路验证（低分辨率出素描纹理） |
 
 \* 视频耗时为 M5 Pro 51GB 实测参照推算，M4 Max 实测后回填；步数不变时近似线性于时长。
 
@@ -201,12 +211,29 @@ lmedia image edit "保持参考图中的角色外观完全一致（{完整锚点
 | `sfx lib verify` 报时长漂移 | 清单记录与实际文件时长差 >0.1s（多半是文件被重编码/覆盖）→ `lib remove <key>` 后重新 `lib add` |
 | `sfx normalize` 输出和输入一样大（没响） | 输入全静音（peak < -60dBFS）→ 跳过增益但写透传副本 + `·` 告警（exit 0），这是防 NaN/削波的保护行为 |
 | `sfx batch` 报「批清单解析失败」 | `-m` 文件存在但为空/非法 JSON（exit 1，不覆写）；文件不存在是 exit 2；key 需 `^[a-z0-9-]+$` 且清单内唯一（违者 exit 2） |
+| `video gen --fast` 报「加速档 bundle 未就绪」 | 先跑 `lmedia video turbo-merge`（一次性合并蒸馏 LoRA） |
+| `turbo-merge` 报「带 SmoothQuant 校准」 | 源 bundle 带校准（idx 有 L*.dout/dw2）时 delta 缩放无法恢复 → 换未校准 bundle（yunfengwang/mmh3turbo-bundles） |
+| `turbo-merge` 报「delta 形状不符/拒绝部分合并」 | LoRA 与 bundle 不是同一架构（如 larryvrh 命名含全宽 adaLN delta，对 pruned 基座无法合并）→ 只支持 lightx2v 命名 |
+| `--fast` 出「素描化」纹理/线条感 | 蒸馏 768p 系的分辨率纪律：短边 ≥ ~700；352p/480p 只做链路验证 |
+| `--fast` 人物视频尾段身份漂移/脸部崩 | few-step 蒸馏的时间漂移：用 8 步版 LoRA（默认）、缩短 `--seconds`、或回到基座 12 步 |
+| `--fast` 出片人脸发糊/油画感 | 蒸馏的固有纹理软化 + 768² 下人脸像素太少：人物用基座 12 步 + 主体特写构图（见上方「人物微动的质量配方」），`--fast` 留给风景/静物/绘本 |
+| `--fast` 换了 LoRA 后步数不对 | 推荐步数随 bundle meta（turbo_nfe）走；合并时漏传 `--nfe` 则 gen 打「按兜底 8 步跑」提示（4 步版 LoRA 必须显式 `--steps 4` 或 `turbo-merge --nfe 4` 重写 meta）；显式 `--steps` 恒可覆盖 |
 | 视频 mp4 缺失只有帧/音频 | 系统无 ffmpeg（封装必需）→ `brew install ffmpeg` |
 | 换 prompt 画面几乎不变 | 中文 prompt 太短被 seed 主导 → 写 30-50 字（见下方视频小节） |
 | H3 权重下载报 LocalEntryNotFoundError | huggingface_hub 客户端（1.x/0.x 均中招）与 hf-mirror 的 resolve 重定向不兼容（308 回源 huggingface.co）→ 不要指望 HF_ENDPOINT，用 `lmedia video setup --mirror`（curl 直落盘到 mmh3turbo 认的本地路径，全部本地命中零网络） |
 | mmh3turbo 下载 GGUF 报 404 | 上游 realrebelai/MiniMax-H3_GGUFs 改了文件名（0.1.0 硬编码旧名）→ `lmedia video setup` 已内置自动补丁；手动修 weights.py 里 GGUF_FILE 为 `qwen3vl-32B-MiniMax-H3-Q2_K.gguf` |
 
 ## 视频生成（本地 MiniMax-H3 / mmh3turbo，零 API 成本）
+
+**先选配方**（`lmedia video recipes` 打印三条实测验收过的完整命令）：
+
+| 场景 | 配方 | 耗时参考 |
+|------|------|---------|
+| **人物微动**（人物视频默认选这个） | 基座 12 步 + 主体特写构图（人脸占画面 1/4+）+ 动作收敛 prompt + ≤5s；一致性要求高再加同图 `--last-frame` 双锚定 | ~23min/条 |
+| 风景/静物/绘本微动 | `--fast` 蒸馏档（8 步 shift 6，短边 ≥700） | ~17min/条 |
+| 人物一致性强化 | 双锚定：同一张图同时做 `--first-frame` + `--last-frame`（结尾人脸相似度 0.3→0.97） | ~25min/条 |
+
+`gen` 会按场景自动打质量提示（stderr），并写进机读 JSON 的 `hints` 字段；详见下方「Lightning 加速档」与「排障 playbook」。
 
 **模型**：MiniMax H3 开源权重（H3-Base FL2VA，33B DiT + Qwen3-VL-32B 文本塔），输出 768p 上限 / 24fps / 1-15s，**原生 32kHz 立体声音轨**。引擎为社区 MLX 移植 [mmh3turbo](https://github.com/vra/mmh3turbo)（自研 int8 Metal kernel，M4 Max 128GB 峰值内存 31GB@768p，权重 ~33GB）。Context-IR / 2K 再生成 / Ref2VA 参考生未开源或引擎未支持，本地只有「文生视频 + 首帧图生视频」。
 
@@ -230,6 +257,22 @@ brew install ffmpeg                # mp4 封装必需（若已装跳过）
 6. 运行中间产物（帧/gif/audio.wav）在 `~/.lmedia/video-runs/<ts>/`，mp4 自动移到 `-o` 路径
 
 **绘本管线配方**：`lmedia image edit`（角色一致性最强路径）出静态页 → `lmedia video gen "微动描述" --first-frame page.png -r 352p`（2-3s 微动循环：花瓣飘落/镜头缓推/角色挥手），对应 little-bee 调研的绘本增强甜点场景。
+
+## Lightning 加速档（`--fast`，few-step 蒸馏）
+
+> 人物视频慎用本档：蒸馏的纹理软化对人脸最敏感（油画感），且时域身份漂移比基座大——人物一律走基座 12 步配方（`lmedia video recipes` ①③）。
+
+背景：[RH-RunningHub/MiniMax-H3-MultiGPU-Lightning](https://github.com/RH-RunningHub/MiniMax-H3-MultiGPU-Lightning) 把 H3 出片从 349s 压到 29s（8×RTX 6000D，12.2×），配方 = **步数蒸馏** + SageAttention2 + Cache-DiT + torch.compile + TP2×Ulysses4 多卡。后四项是 CUDA/多卡专属，Apple Silicon 上能落地的只有**步数蒸馏**；且 RunningHub 官方蒸馏权重未公开，社区开源替代是 lightx2v/Minimax-h3-Turbo（FL2VA 任务，含 t2v/首帧 i2v）等蒸馏 LoRA。
+
+本地实现（`lmedia video turbo-merge` + `lmedia video gen --fast`）：
+
+1. **离线合并**（一次性）：把蒸馏 LoRA 按 `W += scale·B@A`（scale=1，alpha=rank）合并进 mmh3turbo 的 per-row int8 bundle（`python/turbo_merge.py`），量化误差 relL2 < 1%；产出 `~/.cache/mmh3turbo/dit-turbo.bin/.idx`（~19.5GB）。要求源 bundle 未做 SmoothQuant 校准（yunfengwang bundle 即是）；token_refiner 的 delta 因架构输入维不同（5376≠5120）跳过。推荐步数（`--nfe`）写入 bundle meta，`gen --fast` 读它当默认步数。
+2. **推理侧只改一个数**：蒸馏 LoRA（v1.x 768p 系）按 video shift **6** 训练（基座 12），`python/video_gen.py` 打补丁后透传给 mmh3turbo.generate，产物协议与原 CLI 完全一致。引擎本身 cfg=1 单前向 + `simple` 调度，与蒸馏配方天然匹配，零改动。
+3. **档位**：8 步版（默认，LightX2V Studio 同款）身份/音频更稳；4 步版快一倍但尾段身份漂移明显（人物视频不建议）。`--lora` 可指定其它蒸馏 LoRA 重合并。
+4. **分辨率纪律**：蒸馏 768p 系短边别低于 ~700——352p/480p 只用于链路验证，会出「素描化」纹理（out of distribution）。生产用 `square`(768²)/`720p`(704×1280) 及以上。
+5. **耗时**（M4 Max 128GB 实测）：加速比 = 基座步数/蒸馏步数（本地没有 CUDA 的注意力/缓存/多卡乘法）：8 步档 1.5×、4 步档 3×。square 768² 4s 片段实测 8 步 ~17min/条、4 步 ~6min/条（含 ~2min 冷加载）；人物视频选 8 步。
+6. **人物微动的质量配方**（2026-09-11 实录）：`--fast` 蒸馏档即使 8 步，人脸也会有「AI 油画感」——蒸馏拿纹理换速度，脸部最先受伤；且 768² 画布下全场景构图的人脸只占几十像素。要人物清晰：**主体特写构图**（裁剪让人脸占画面 1/4 以上，像素数 ×2~3）+ **基座 12 步**（不加 `--fast`，square 768² 4s 约 23min/条）。风景/静物/绘本微动用 `--fast` 足够。
+7. **人物一致性：双锚定**（`--last-frame`）：只锚首帧时结尾身份必漂（ArcFace 实测结尾人脸相似度 0.29~0.46）；同一张图同时喂 `--first-frame` + `--last-frame`（回环动作），结尾拉回 **0.97~0.98**。走路位移类构图不适用（会被迫回到起点）。配方命令：`lmedia video recipes`。
 
 ## 维护
 

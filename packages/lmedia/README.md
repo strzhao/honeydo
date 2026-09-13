@@ -9,7 +9,7 @@
 | 子树 | 状态 | 能力 |
 |------|------|------|
 | `lmedia image` | ✅ 就绪 | 文生图（Qwen-Image-2512 bf16 + true CFG + LoRA 叠加）、参考图编辑（Qwen-Image-Edit-2511，角色一致性最强路径）、Lightning 蒸馏快速档（`--fast`）、批量出图（`--num`）、Real-ESRGAN 超分 |
-| `lmedia video` | ✅ 就绪 | 文生视频 + 首帧图生视频（本地 MiniMax-H3 开源权重 / mmh3turbo MLX 引擎，768p 上限，mp4 含原生立体声，零 API 成本） |
+| `lmedia video` | ✅ 就绪 | 文生视频 + 首帧图生视频（本地 MiniMax-H3 开源权重 / mmh3turbo MLX 引擎，768p 上限，mp4 含原生立体声，零 API 成本）；`--fast` Lightning few-step 蒸馏加速档（社区 turbo LoRA 离线合并进 int8 bundle，4 步 3× / 8 步 1.5×） |
 | `lmedia sfx` | ✅ 就绪 | 音效产线（Dasheng-AudioGen 本地）：单条/批量生成（质量门+掷样选优）、剪裁/重剪、响度归一、量化验收、A/B 试听页、SSOT 音效库（入库/对账） |
 | `lmedia lora` | ✅ | LoRA 注册表（风格/角色/加速三类，含触发词与默认权重） |
 | `lmedia doctor` | ✅ | 环境自检（图像/视频/音效分段展示，`lmedia sfx doctor` 为音效权威自检） |
@@ -41,6 +41,13 @@ lmedia image upscale in.png out.png --size 2730x1535
 lmedia video gen "小蜜蜂男孩在花园里挥手，花瓣飘落，镜头缓慢推近，细节丰富" -r 480p -o scene.mp4
 lmedia video gen "角色轻轻挥手" --first-frame page.png -r 352p -o page-motion.mp4
 
+# 视频加速档（Lightning few-step 蒸馏；首次先 turbo-merge 一次性合并，详见 USAGE.md）
+lmedia video turbo-merge
+lmedia video gen "爸爸抱着宝宝俯身去摸小草，宝宝伸手轻碰，绿叶轻晃，镜头极缓慢推近" --fast -r square --seconds 4 --first-frame photo.jpg -o clip.mp4
+
+# 生产配方（人物微动/风景绘本/双锚定一致性，实测验收，复制即用）
+lmedia video recipes
+
 # LoRA 注册表
 lmedia lora list
 lmedia lora add mimi ./mimi.safetensors --kind character --trigger "mimi_cat 小橘猫女孩" --weight 1.0
@@ -70,12 +77,12 @@ lmedia doctor
 ## 架构
 
 ```
-src/commands/   image.ts（gen/edit/upscale）· video.ts（setup/gen/list-res）· sfx.ts（gen/batch/trim/recut/normalize/accept/ab/setup/doctor/lib）· lora.ts · doctor.ts
+src/commands/   image.ts（gen/edit/upscale）· video.ts（setup/gen/turbo-merge/list-res）· sfx.ts（gen/batch/trim/recut/normalize/accept/ab/setup/doctor/lib）· lora.ts · doctor.ts
 src/lib/        runtime.ts（venv/模型快照/HF 缓存解析 + 视频/音效运行时）· registry.ts（LoRA 注册表）· sfx-library.ts（SSOT 音效库）· sfx-args.ts（音效参数校验）· run-python.ts · which.ts
 python/         gen.py · edit.py · upscale.py · sfx.py（gen/batch/trim/recut/normalize/accept/abpage/probe op 分发；JSON argv 协议，stdout 末行单行 JSON 回传，人读进度走 stderr）
 ```
 
-视频模态不走 python/ 驱动：直接 spawn `<栈目录>/.venv-video/bin/mmh3turbo`（社区 MLX 引擎，权重 ~33GB 首次生成自动下载到 HF 缓存），进度镜像到 stderr、结果 JSON 走 stdout，与图像命令同契约。
+视频模态不走 python/ 驱动：直接 spawn `<栈目录>/.venv-video/bin/mmh3turbo`（社区 MLX 引擎，权重 ~33GB 首次生成自动下载到 HF 缓存），进度镜像到 stderr、结果 JSON 走 stdout，与图像命令同契约。`--fast` 加速档例外：spawn `python/video_gen.py`（打 video-shift 蒸馏补丁后透传 generate.main），bundle 由 `python/turbo_merge.py` 离线合并（蒸馏 LoRA → per-row int8 重量化）。
 
 音效产线（`python/sfx.py`）：`gen|batch` 走 Dasheng-AudioGen（`.venv-audio`，质量门 peak≥-25dBFS + SNR≥20dB，全废自动加掷≤2）；`trim|recut|normalize|accept|abpage|probe` 只依赖 ffmpeg（两遍法：先测段内峰值再增益，修复整掷归一错位）。SSOT 音效库 `~/.config/limg/sfx-library/`（`--lib` > `LMEDIA_SFX_LIB` env > 默认），清单损坏一律报错不重建。
 

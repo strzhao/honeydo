@@ -24,6 +24,7 @@ export interface VideoRuntime {
   pythonVideo: string; // <root>/.venv-video/bin/python
   mmh3turbo: string;   // mmh3turbo 可执行文件
   weightsDir: string;  // H3 权重本地目录 ~/.cache/mmh3turbo（dit.bin 等就绪即免下载）
+  pythonDir: string;   // CLI 自带 python 驱动目录（turbo_merge.py / video_gen.py）
 }
 
 /** 音效模态运行时（Dasheng-AudioGen，transformers<5 + MPS） */
@@ -64,7 +65,9 @@ export function resolveVideoRuntime(): VideoRuntime {
     venvVideo: path.join(root, '.venv-video'),
     pythonVideo: path.join(root, '.venv-video', 'bin', 'python'),
     mmh3turbo: path.join(root, '.venv-video', 'bin', 'mmh3turbo'),
-    weightsDir: path.join(os.homedir(), '.cache', 'mmh3turbo'),
+    weightsDir: process.env.LMEDIA_WEIGHTS_DIR
+      ?? path.join(os.homedir(), '.cache', 'mmh3turbo'),
+    pythonDir: pythonDriverDir(),
   };
 }
 

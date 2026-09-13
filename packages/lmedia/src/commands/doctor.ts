@@ -20,6 +20,7 @@ export function registerDoctor(program: Command): void {
         ['[video] .venv-video（mmh3turbo）', fs.existsSync(vrt.mmh3turbo)],
         ['[video] ffmpeg', hasCommand('ffmpeg')],
         ['[video] H3 权重（~/.cache/mmh3turbo，未就绪时首次生成自动下载或 setup --mirror）', fs.existsSync(path.join(vrt.weightsDir, 'dit.bin'))],
+        ['[video] 加速档 bundle dit-turbo（--fast 用；缺失跑 lmedia video turbo-merge）', fs.existsSync(path.join(vrt.weightsDir, 'dit-turbo.bin'))],
       ];
       // —— 图像栈（缺失时打印错误但继续输出 [video] 部分）——
       let imageOk = true;
