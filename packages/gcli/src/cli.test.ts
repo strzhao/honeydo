@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   API_DEFAULT_MAX_TOKENS,
+  type ApiRequest,
   applyPickerKey,
   buildAgyArgs,
   buildApiBody,
@@ -11,8 +12,10 @@ import {
   CHARACTER_LIMIT,
   deriveHermesId,
   deriveKeyEnv,
+  describeNoTextBody,
   editHermesConfig,
   extractNonStreamText,
+  extractSseLineMeta,
   extractTextDelta,
   formatQuota,
   HERMES_PROVIDER_SEEDS,
@@ -30,6 +33,7 @@ import {
   parseHermesStateFile,
   parseKimiUsages,
   parseSubcommand,
+  runApi,
   serializeHermesRegistry,
   serializeHermesStateFile,
   stripContextSuffix,
@@ -1275,5 +1279,378 @@ describe("HERMES_PROVIDER_SEEDS", () => {
       id: "glm-flash",
       keyEnv: "BIGMODEL_API_KEY",
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// api backend: --thinking / --retry (bug handoff gcli-api-flaky-handoff)
+// ---------------------------------------------------------------------------
+
+describe("parseApiArgs --thinking/--retry", () => {
+  it("defaults to thinking=auto, retries=1", () => {
+    const r = parseApiArgs(["-p", "hi", "--provider", "kimi"]);
+    expect("error" in r).toBe(false);
+    if (!("error" in r)) {
+      expect(r.thinking).toBe("auto");
+      expect(r.retries).toBe(1);
+    }
+  });
+
+  it("accepts --thinking off and --thinking on", () => {
+    for (const t of ["off", "on"] as const) {
+      const r = parseApiArgs([
+        "-p",
+        "hi",
+        "--provider",
+        "kimi",
+        "--max-tokens",
+        "4000",
+        "--thinking",
+        t,
+      ]);
+      expect("error" in r).toBe(false);
+      if (!("error" in r)) expect(r.thinking).toBe(t);
+    }
+  });
+
+  it("rejects an unknown --thinking value", () => {
+    const r = parseApiArgs([
+      "-p",
+      "hi",
+      "--provider",
+      "kimi",
+      "--thinking",
+      "maybe",
+    ]);
+    expect("error" in r).toBe(true);
+    if ("error" in r) expect(r.error).toContain("auto|off|on");
+  });
+
+  it("rejects --thinking on below the 2048 max-tokens floor", () => {
+    const r = parseApiArgs([
+      "-p",
+      "hi",
+      "--provider",
+      "kimi",
+      "--max-tokens",
+      "100",
+      "--thinking",
+      "on",
+    ]);
+    expect("error" in r).toBe(true);
+    if ("error" in r) expect(r.error).toContain(">= 2048");
+  });
+
+  it("parses --retry 0 (disable) and --retry 5", () => {
+    const r0 = parseApiArgs(["-p", "hi", "--provider", "kimi", "--retry", "0"]);
+    expect("error" in r0).toBe(false);
+    if (!("error" in r0)) expect(r0.retries).toBe(0);
+    const r5 = parseApiArgs(["-p", "hi", "--provider", "kimi", "--retry", "5"]);
+    expect("error" in r5).toBe(false);
+    if (!("error" in r5)) expect(r5.retries).toBe(5);
+  });
+
+  it("rejects out-of-range / non-integer --retry", () => {
+    expect(
+      "error" in
+        parseApiArgs(["-p", "hi", "--provider", "kimi", "--retry", "6"]),
+    ).toBe(true);
+    expect(
+      "error" in
+        parseApiArgs(["-p", "hi", "--provider", "kimi", "--retry", "1.5"]),
+    ).toBe(true);
+    expect(
+      "error" in
+        parseApiArgs(["-p", "hi", "--provider", "kimi", "--retry", "x"]),
+    ).toBe(true);
+  });
+});
+
+describe("buildApiBody --thinking wiring", () => {
+  const base = {
+    model: "glm-5.3-flash",
+    maxTokens: 8000,
+    prompt: "hi",
+    stream: false,
+  };
+
+  it("sends thinking:disabled for off", () => {
+    const body = buildApiBody({ ...base, thinking: "off" });
+    expect(body.thinking).toEqual({ type: "disabled" });
+  });
+
+  it("sends thinking:enabled with budget = max_tokens/2 for on", () => {
+    const body = buildApiBody({ ...base, maxTokens: 8000, thinking: "on" });
+    expect(body.thinking).toEqual({ type: "enabled", budget_tokens: 4000 });
+  });
+
+  it("omits the thinking field for auto/undefined (endpoint default, k3 quality)", () => {
+    expect(buildApiBody({ ...base })).not.toHaveProperty("thinking");
+    expect(buildApiBody({ ...base, thinking: undefined })).not.toHaveProperty(
+      "thinking",
+    );
+  });
+});
+
+describe("extractSseLineMeta", () => {
+  it("extracts text_delta + parsed", () => {
+    const m = extractSseLineMeta(
+      'data:{"type":"content_block_delta","delta":{"type":"text_delta","text":"HI"}}',
+    );
+    expect(m.text).toBe("HI");
+    expect(m.thinkingChars).toBe(0);
+    expect(m.parsed).toBe(true);
+  });
+
+  it("counts thinking_delta characters (budget-starvation diagnosis)", () => {
+    const m = extractSseLineMeta(
+      'data:{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"abcd"}}',
+    );
+    expect(m.text).toBeNull();
+    expect(m.thinkingChars).toBe(4);
+    expect(m.parsed).toBe(true);
+  });
+
+  it("captures message_delta stop_reason", () => {
+    const m = extractSseLineMeta(
+      'data:{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}',
+    );
+    expect(m.stopReason).toBe("max_tokens");
+    expect(m.parsed).toBe(true);
+  });
+
+  it("marks control events (ping/message_start) as parsed with no payload", () => {
+    const m = extractSseLineMeta('data:{"type":"ping"}');
+    expect(m.parsed).toBe(true);
+    expect(m.text).toBeNull();
+    expect(m.thinkingChars).toBe(0);
+    expect(m.stopReason).toBeUndefined();
+  });
+
+  it("returns empty meta for non-data / malformed / [DONE] lines", () => {
+    expect(extractSseLineMeta("event: content_block_delta").parsed).toBe(false);
+    expect(extractSseLineMeta("data:{not json").parsed).toBe(false);
+    expect(extractSseLineMeta("data:[DONE]").parsed).toBe(false);
+    expect(extractSseLineMeta("data:").parsed).toBe(false);
+  });
+});
+
+describe("describeNoTextBody", () => {
+  it("identifies a thinking-only response starved by max_tokens", () => {
+    const info = describeNoTextBody({
+      content: [{ type: "thinking", thinking: "..." }],
+      stop_reason: "max_tokens",
+    });
+    expect(info.blocks).toBe("thinking");
+    expect(info.sawThinking).toBe(true);
+    expect(info.stopReason).toBe("max_tokens");
+  });
+
+  it("identifies an empty content array (gateway hiccup, retriable)", () => {
+    const info = describeNoTextBody({ content: [], stop_reason: "end_turn" });
+    expect(info.blocks).toBe("");
+    expect(info.sawThinking).toBe(false);
+  });
+
+  it("handles missing content / non-object bodies", () => {
+    expect(describeNoTextBody({}).blocks).toBe("");
+    expect(describeNoTextBody("oops").blocks).toBe("");
+  });
+});
+
+// runApi: retry + diagnosis behaviour against a stubbed global fetch.
+describe("runApi retries and diagnostics", () => {
+  const req = (over: Partial<ApiRequest> = {}): ApiRequest => ({
+    url: "https://relay.test/v1/messages",
+    token: "tok",
+    model: "glm-5.3-flash",
+    maxTokens: 100,
+    prompt: "hi",
+    stream: false,
+    timeoutMs: 60_000,
+    retries: 1,
+    ...over,
+  });
+  const jsonResponse = (body: unknown, status = 200): Response =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+  const textResponse = (text: string, status = 200): Response =>
+    new Response(text, { status });
+  const sseResponse = (events: string[]): Response => {
+    const enc = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const e of events)
+          controller.enqueue(enc.encode(`data: ${e}\n\n`));
+        controller.close();
+      },
+    });
+    return new Response(stream, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" },
+    });
+  };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("non-stream success on first attempt (no retry notes)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          content: [{ type: "text", text: "收到" }],
+          stop_reason: "end_turn",
+        }),
+      ),
+    );
+    const out = await runApi(req());
+    expect(out.exitCode).toBe(0);
+    expect(out.stdout).toBe("收到");
+    expect(out.stderr).toBe("");
+  });
+
+  it("retries a network-level fetch failure then succeeds", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("fetch failed"))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: "end_turn",
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const out = await runApi(req());
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(out.exitCode).toBe(0);
+    expect(out.stdout).toBe("ok");
+    expect(out.stderr).toContain(
+      "attempt 1/2 failed (fetch failed: fetch failed)",
+    );
+  });
+
+  it("gives up after the retry budget with notes preserved", async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new TypeError("fetch failed");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const out = await runApi(req({ retries: 2 }));
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(out.exitCode).toBe(1);
+    expect(out.stderr).toContain("attempt 1/3");
+    expect(out.stderr).toContain("attempt 2/3");
+    expect(out.stderr).toContain("gcli: api request failed: fetch failed");
+  });
+
+  it("retries HTTP 502 then succeeds; does NOT retry HTTP 401", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(textResponse("bad gateway", 502))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: "end_turn",
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const ok502 = await runApi(req());
+    expect(ok502.exitCode).toBe(0);
+    expect(ok502.stderr).toContain("attempt 1/2 failed (HTTP 502)");
+
+    const authFail = vi.fn(async () => textResponse("denied", 401));
+    vi.stubGlobal("fetch", authFail);
+    const out401 = await runApi(req());
+    expect(authFail).toHaveBeenCalledTimes(1);
+    expect(out401.exitCode).toBe(1);
+    expect(out401.stderr).toContain("HTTP 401");
+  });
+
+  it("non-stream thinking-only 200: diagnosed, NOT retried", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        content: [{ type: "thinking", thinking: "I should reply 收到..." }],
+        stop_reason: "max_tokens",
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const out = await runApi(req());
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(out.exitCode).toBe(1);
+    expect(out.stdout).toBe("");
+    expect(out.stderr).toContain("blocks=[thinking]");
+    expect(out.stderr).toContain("stop_reason=max_tokens");
+    expect(out.stderr).toContain("--thinking off");
+  });
+
+  it("non-stream empty content[]: retried as a transient gateway hiccup", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ content: [] }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: "end_turn",
+        }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const out = await runApi(req());
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(out.exitCode).toBe(0);
+  });
+
+  it("stream thinking-only to stop_reason=max_tokens: diagnosed, NOT retried", async () => {
+    const fetchMock = vi.fn(async () =>
+      sseResponse([
+        '{"type":"message_start"}',
+        '{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"ponder"}}',
+        '{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}',
+        '{"type":"message_stop"}',
+      ]),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const out = await runApi(req({ stream: true }));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(out.exitCode).toBe(1);
+    expect(out.stderr).toContain("thinking ~6ch");
+    expect(out.stderr).toContain("stop_reason=max_tokens");
+    expect(out.stderr).toContain("--thinking off");
+  });
+
+  it("stream with zero SSE events: retried, then succeeds", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("", { status: 200 }))
+      .mockResolvedValueOnce(
+        sseResponse([
+          '{"type":"content_block_delta","delta":{"type":"text_delta","text":"收到"}}',
+          '{"type":"message_delta","delta":{"stop_reason":"end_turn"}}',
+        ]),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const out = await runApi(req({ stream: true }));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(out.exitCode).toBe(0);
+    expect(out.stdout).toBe("收到");
+    expect(out.stderr).toContain("attempt 1/2 failed (no SSE events)");
+  });
+
+  it("retry request body honours the thinking mode", async () => {
+    let captured: Record<string, unknown> | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: { body?: string }) => {
+        captured = JSON.parse(init?.body ?? "{}") as Record<string, unknown>;
+        return jsonResponse({
+          content: [{ type: "text", text: "ok" }],
+          stop_reason: "end_turn",
+        });
+      }),
+    );
+    await runApi(req({ thinking: "off", maxTokens: 4000 }));
+    expect(captured?.thinking).toEqual({ type: "disabled" });
   });
 });

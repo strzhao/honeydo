@@ -779,6 +779,17 @@ export interface ApiRequest {
   prompt: string;
   stream: boolean;
   timeoutMs: number;
+  /**
+   * Explicit thinking control: "off" sends {type:"disabled"}, "on" sends
+   * {type:"enabled", budget_tokens: floor(maxTokens/2)}. Undefined (= CLI
+   * `--thinking auto`) omits the field entirely and keeps the endpoint's
+   * default — which on bigmodel GLM endpoints means thinking ON, where
+   * thinking shares the max_tokens budget with text (small budgets can end
+   * up thinking-only, no text block).
+   */
+  thinking?: "off" | "on";
+  /** Transient-failure retries (network error / 408/429/5xx / malformed JSON / empty body). 0 = single attempt. */
+  retries?: number;
 }
 
 /**
@@ -789,17 +800,32 @@ export interface ApiRequest {
  * high-quality output in ~45s vs claude-agent's 53min). We rely on a sufficient
  * --max-tokens budget (default 80000) to cover both thinking and text, not on
  * disabling thinking. Disabling it would discard the very capability we chose
- * k3 for.
+ * k3 for. (`--thinking auto`, the CLI default, preserves this omitted-field
+ * behaviour. bigmodel GLM endpoints default thinking ON and share max_tokens
+ * between thinking and text — small explicit budgets can end up thinking-only;
+ * --thinking off/on send explicit disabled/enabled for that case.)
  */
 export function buildApiBody(
-  req: Pick<ApiRequest, "model" | "maxTokens" | "prompt" | "stream">,
+  req: Pick<
+    ApiRequest,
+    "model" | "maxTokens" | "prompt" | "stream" | "thinking"
+  >,
 ): Record<string, unknown> {
-  return {
+  const body: Record<string, unknown> = {
     model: req.model,
     max_tokens: req.maxTokens,
     stream: req.stream,
     messages: [{ role: "user", content: req.prompt }],
   };
+  if (req.thinking === "off") {
+    body.thinking = { type: "disabled" };
+  } else if (req.thinking === "on") {
+    body.thinking = {
+      type: "enabled",
+      budget_tokens: Math.floor(req.maxTokens / 2),
+    };
+  }
+  return body;
 }
 
 /**
@@ -824,26 +850,7 @@ export function buildApiEndpoint(baseUrl: string): string {
  * `data:{...}` (kimi, no space) and `data: {...}` (with space) parse the same.
  */
 export function extractTextDelta(line: string): string | null {
-  const trimmed = line.trim();
-  if (!trimmed.startsWith("data:")) return null;
-  const payload = trimmed.slice("data:".length).trim();
-  if (!payload || payload === "[DONE]") return null;
-  try {
-    const evt = JSON.parse(payload) as {
-      type?: string;
-      delta?: { type?: string; text?: string };
-    };
-    if (
-      evt.type === "content_block_delta" &&
-      evt.delta?.type === "text_delta" &&
-      typeof evt.delta.text === "string"
-    ) {
-      return evt.delta.text;
-    }
-    return null;
-  } catch {
-    return null;
-  }
+  return extractSseLineMeta(line).text;
 }
 
 /**
@@ -869,6 +876,117 @@ export function extractNonStreamText(body: unknown): string {
   }
   return out;
 }
+
+/** What a single SSE `data:` line contributes to the stream aggregation. */
+export interface SseLineMeta {
+  /** Text fragment for content_block_delta/text_delta events, else null. */
+  text: string | null;
+  /** Characters contributed by a thinking_delta (thinking models spend the
+   * shared max_tokens budget here before any text is emitted). */
+  thinkingChars: number;
+  /** stop_reason carried by a message_delta event (e.g. "max_tokens"). */
+  stopReason?: string;
+  /** True when the line was a `data:` payload that JSON-parsed (any event type). */
+  parsed: boolean;
+}
+
+const SSE_LINE_EMPTY: SseLineMeta = {
+  text: null,
+  thinkingChars: 0,
+  parsed: false,
+};
+
+/**
+ * SSE line → structured meta (text delta + thinking volume + stop_reason).
+ *
+ * One JSON.parse per line feeding both the text aggregation and the "why did a
+ * stream produce no text" diagnosis (thinking-only streams that end in
+ * stop_reason=max_tokens are an endpoint budget issue, not a transport one).
+ * Non-`data:` lines / malformed JSON → empty meta.
+ */
+export function extractSseLineMeta(line: string): SseLineMeta {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("data:")) return SSE_LINE_EMPTY;
+  const payload = trimmed.slice("data:".length).trim();
+  if (!payload || payload === "[DONE]") return SSE_LINE_EMPTY;
+  try {
+    const evt = JSON.parse(payload) as {
+      type?: string;
+      delta?: {
+        type?: string;
+        text?: string;
+        thinking?: string;
+        stop_reason?: string;
+      };
+    };
+    const meta: SseLineMeta = {
+      text: null,
+      thinkingChars: 0,
+      parsed: true,
+    };
+    if (evt.type === "content_block_delta") {
+      if (
+        evt.delta?.type === "text_delta" &&
+        typeof evt.delta.text === "string"
+      ) {
+        meta.text = evt.delta.text;
+      } else if (
+        evt.delta?.type === "thinking_delta" &&
+        typeof evt.delta.thinking === "string"
+      ) {
+        meta.thinkingChars = evt.delta.thinking.length;
+      }
+    } else if (
+      evt.type === "message_delta" &&
+      typeof evt.delta?.stop_reason === "string"
+    ) {
+      meta.stopReason = evt.delta.stop_reason;
+    }
+    return meta;
+  } catch {
+    return SSE_LINE_EMPTY;
+  }
+}
+
+/** Non-streaming body → why extractNonStreamText found no text. */
+export interface NoTextBodyInfo {
+  /** content block type names in order, comma-joined ("" = no content at all). */
+  blocks: string;
+  sawThinking: boolean;
+  stopReason?: string;
+}
+
+/**
+ * Inspect a 200 non-streaming messages body that yielded no text, so the error
+ * can say WHY (thinking-only under a starved max_tokens budget vs an empty
+ * content array from a flaky gateway — the former is deterministic, the latter
+ * is worth retrying).
+ */
+export function describeNoTextBody(body: unknown): NoTextBodyInfo {
+  const info: NoTextBodyInfo = { blocks: "", sawThinking: false };
+  if (typeof body !== "object" || body === null) return info;
+  const obj = body as {
+    content?: unknown;
+    stop_reason?: unknown;
+  };
+  if (typeof obj.stop_reason === "string") info.stopReason = obj.stop_reason;
+  if (!Array.isArray(obj.content)) return info;
+  const names: string[] = [];
+  for (const block of obj.content) {
+    if (typeof block === "object" && block !== null) {
+      const type = (block as { type?: unknown }).type;
+      if (typeof type === "string") {
+        names.push(type);
+        if (type === "thinking") info.sawThinking = true;
+      }
+    }
+  }
+  info.blocks = names.join(",");
+  return info;
+}
+
+/** HTTP statuses worth an automatic retry (transient server/gateway trouble). */
+export const API_RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 
 /** Parsed options for the hermes subcommand (strict: unknown flags error). */
 export interface ParsedHermesArgs {
@@ -1530,6 +1648,10 @@ export interface ParsedApiArgs {
   maxTokens: number;
   timeoutMs: number;
   stream: boolean;
+  /** `auto` (default) omits the thinking field; `off`/`on` send it explicitly. */
+  thinking: "auto" | "off" | "on";
+  /** Transient-failure retries (default 1; 0 disables). */
+  retries: number;
   version: boolean;
   help: boolean;
   /** --cwd was supplied (warned + ignored by the api backend). */
@@ -1568,6 +1690,8 @@ export function parseApiArgs(argv: string[]): ParseApiResult {
         provider: { type: "string" },
         "max-tokens": { type: "string" },
         timeout: { type: "string" },
+        thinking: { type: "string" },
+        retry: { type: "string" },
         stream: { type: "boolean" },
         version: { type: "boolean" },
         help: { type: "boolean" },
@@ -1599,6 +1723,37 @@ export function parseApiArgs(argv: string[]): ParseApiResult {
       timeoutMs = n;
     }
 
+    // thinking: auto (default, omit field — endpoint default, k3 keeps its
+    // quality source) | off (disabled; avoids thinking-only responses on
+    // budget-starved requests) | on (enabled, budget = max_tokens/2, hence
+    // the >= 2048 floor).
+    let thinking: "auto" | "off" | "on" = "auto";
+    if (values.thinking !== undefined) {
+      const t = values.thinking;
+      if (t !== "auto" && t !== "off" && t !== "on") {
+        return {
+          error: `--thinking must be auto|off|on, got "${t}"`,
+        };
+      }
+      thinking = t;
+    }
+    if (thinking === "on" && maxTokens < 2048) {
+      return {
+        error: `--thinking on needs --max-tokens >= 2048 (thinking budget = max_tokens/2 = ${Math.floor(maxTokens / 2)}), got ${maxTokens}`,
+      };
+    }
+
+    let retries = 1;
+    if (values.retry !== undefined) {
+      const n = Number(values.retry);
+      if (!Number.isInteger(n) || n < 0 || n > 5) {
+        return {
+          error: `--retry must be an integer in [0, 5], got "${values.retry}"`,
+        };
+      }
+      retries = n;
+    }
+
     return {
       prompt: typeof values.prompt === "string" ? values.prompt : undefined,
       model: typeof values.model === "string" ? values.model : undefined,
@@ -1608,6 +1763,8 @@ export function parseApiArgs(argv: string[]): ParseApiResult {
       timeoutMs,
       // default stream=true; --no-stream (allowNegative) → false
       stream: values.stream !== false,
+      thinking,
+      retries,
       version: values.version === true,
       help: values.help === true,
       cwd: typeof values.cwd === "string" ? values.cwd : undefined,
@@ -1790,28 +1947,70 @@ export function runClaudeInteractive(
 // api backend — production HTTP implementation (zero deps: fetch + TextDecoder)
 // ---------------------------------------------------------------------------
 
+/** One HTTP attempt: the outcome plus a retry reason when transient, else false. */
+interface ApiAttempt {
+  outcome: RunOutcome;
+  retryable: string | false;
+}
+
+const API_RETRY_BASE_DELAY_MS = 400;
+const API_RETRY_MAX_DELAY_MS = 4000;
+
 /**
  * Production deps.runApi: POST an anthropic-compatible /v1/messages request
  * and return a normalized RunOutcome.
  *
  * - stream=true: reads the SSE body chunk-by-chunk, decodes UTF-8, splits on
  *   newlines, and aggregates `text_delta` payloads into stdout. Two clocks
- *   guard against hangs: an idle timer (reset on every text-bearing chunk)
- *   and an absolute timer (timeoutMs). Either firing aborts the fetch via
- *   AbortController → exit 1 with a timeout message.
+ *   guard against hangs: an idle timer (reset on EVERY received chunk —
+ *   thinking models can emit long non-text stretches) and an absolute timer
+ *   (timeoutMs). Either firing aborts the fetch via AbortController → exit 1
+ *   with a timeout message.
  * - stream=false: awaits the full JSON body and extracts `content[].text`,
  *   then applies the 50k-char truncation.
+ *
+ * TRANSIENT failures are retried automatically (default 1 retry, `--retry N`):
+ * network-level fetch errors, HTTP 408/429/5xx, malformed JSON, empty-content
+ * 200 bodies, and streams that die or deliver no SSE events at all. Each retry
+ * note lands on stderr (stdout stays pipe-clean), so a recovered attempt still
+ * leaves a trace. Deterministic failures are NOT retried — timeouts, 4xx, and
+ * thinking-only responses (retrying cannot fix a max_tokens budget starved by
+ * endpoint-default thinking); those errors carry a diagnosis instead.
  *
  * HTTP errors (non-2xx, network failure, abort) → exit 1 with diagnostics on
  * stderr; stdout stays empty so the caller's empty-output guard still works.
  */
 export async function runApi(req: ApiRequest): Promise<RunOutcome> {
+  const maxAttempts = Math.max(1, (req.retries ?? 0) + 1);
+  const retryNotes: string[] = [];
+  for (let attempt = 1; ; attempt++) {
+    const res = await runApiAttempt(req);
+    if (res.retryable === false || attempt >= maxAttempts) {
+      if (retryNotes.length === 0) return res.outcome;
+      return {
+        ...res.outcome,
+        stderr: [...retryNotes, res.outcome.stderr].join("\n"),
+      };
+    }
+    const delayMs = Math.min(
+      API_RETRY_MAX_DELAY_MS,
+      API_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1),
+    );
+    retryNotes.push(
+      `gcli: api attempt ${attempt}/${maxAttempts} failed (${res.retryable}); retrying in ${delayMs}ms`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+}
+
+/** A single fetch + body-consumption pass (fresh AbortController + timers). */
+async function runApiAttempt(req: ApiRequest): Promise<ApiAttempt> {
   const controller = new AbortController();
   const { signal } = controller;
 
   // Two timers: absolute + idle. timeoutMs is both the hard ceiling and the
   // default idle budget — SSE streams that go quiet for that long are treated
-  // as hung. We reset the idle clock whenever we receive text.
+  // as hung. We reset the idle clock whenever we receive any chunk.
   let idleTimer: NodeJS.Timeout | undefined;
   let absoluteTimer: NodeJS.Timeout | undefined;
   let timedOut = false;
@@ -1832,6 +2031,11 @@ export async function runApi(req: ApiRequest): Promise<RunOutcome> {
     if (idleTimer) clearTimeout(idleTimer);
     if (absoluteTimer) clearTimeout(absoluteTimer);
   };
+  const timeoutOutcome = (): RunOutcome => ({
+    exitCode: 1,
+    stdout: "",
+    stderr: `gcli: api timed out after ${req.timeoutMs}ms`,
+  });
 
   const headers: Record<string, string> = {
     Authorization: `Bearer ${req.token}`,
@@ -1850,18 +2054,15 @@ export async function runApi(req: ApiRequest): Promise<RunOutcome> {
     });
   } catch (err) {
     clearTimers();
-    if (timedOut) {
-      return {
-        exitCode: 1,
-        stdout: "",
-        stderr: `gcli: api timed out after ${req.timeoutMs}ms`,
-      };
-    }
+    if (timedOut) return { outcome: timeoutOutcome(), retryable: false };
     const msg = err instanceof Error ? err.message : String(err);
     return {
-      exitCode: 1,
-      stdout: "",
-      stderr: `gcli: api request failed: ${msg}`,
+      outcome: {
+        exitCode: 1,
+        stdout: "",
+        stderr: `gcli: api request failed: ${msg}`,
+      },
+      retryable: `fetch failed: ${msg}`.slice(0, 120),
     };
   }
 
@@ -1875,9 +2076,14 @@ export async function runApi(req: ApiRequest): Promise<RunOutcome> {
     }
     const trimmed = detail.trim().slice(0, 1000);
     return {
-      exitCode: 1,
-      stdout: "",
-      stderr: `gcli: api returned HTTP ${response.status}${trimmed ? `: ${trimmed}` : ""}`,
+      outcome: {
+        exitCode: 1,
+        stdout: "",
+        stderr: `gcli: api returned HTTP ${response.status}${trimmed ? `: ${trimmed}` : ""}`,
+      },
+      retryable: API_RETRYABLE_STATUS.has(response.status)
+        ? `HTTP ${response.status}`
+        : false,
     };
   }
 
@@ -1889,20 +2095,59 @@ export async function runApi(req: ApiRequest): Promise<RunOutcome> {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return {
-        exitCode: 1,
-        stdout: "",
-        stderr: `gcli: api returned malformed JSON: ${msg}`,
+        outcome: {
+          exitCode: 1,
+          stdout: "",
+          stderr: `gcli: api returned malformed JSON: ${msg}`,
+        },
+        retryable: "malformed JSON",
+      };
+    }
+    // Some gateways answer 200 with an error envelope instead of a message.
+    const errEnvelope = body as { type?: unknown; error?: unknown };
+    if (errEnvelope.type === "error" || errEnvelope.error != null) {
+      return {
+        outcome: {
+          exitCode: 1,
+          stdout: "",
+          stderr: `gcli: api returned an error body: ${JSON.stringify(body).slice(0, 500)}`,
+        },
+        retryable: false,
       };
     }
     const text = extractNonStreamText(body);
     if (!text) {
+      const info = describeNoTextBody(body);
+      if (!info.blocks) {
+        // 200 with nothing usable in content — gateway hiccup, worth a retry.
+        return {
+          outcome: {
+            exitCode: 1,
+            stdout: "",
+            stderr: "gcli: api returned no text content (empty content[])",
+          },
+          retryable: "empty content[]",
+        };
+      }
       return {
-        exitCode: 1,
-        stdout: "",
-        stderr: "gcli: api returned no text content",
+        outcome: {
+          exitCode: 1,
+          stdout: "",
+          stderr:
+            `gcli: api returned no text content (blocks=[${info.blocks}]` +
+            `${info.stopReason ? `, stop_reason=${info.stopReason}` : ""})` +
+            (info.sawThinking
+              ? " — thinking consumed the whole max_tokens budget; raise --max-tokens or pass --thinking off"
+              : ""),
+        },
+        // thinking-only is a deterministic budget outcome, not a flake
+        retryable: false,
       };
     }
-    return { exitCode: 0, stdout: truncate(text), stderr: "" };
+    return {
+      outcome: { exitCode: 0, stdout: truncate(text), stderr: "" },
+      retryable: false,
+    };
   }
 
   // Streaming: aggregate text_delta chunks. response.body is a web stream;
@@ -1910,68 +2155,110 @@ export async function runApi(req: ApiRequest): Promise<RunOutcome> {
   // leftover buffer carries the partial final line until the next newline.
   if (response.body === null) {
     clearTimers();
-    return { exitCode: 1, stdout: "", stderr: "gcli: api stream had no body" };
+    return {
+      outcome: {
+        exitCode: 1,
+        stdout: "",
+        stderr: "gcli: api stream had no body",
+      },
+      retryable: "stream had no body",
+    };
   }
   const reader = response.body.getReader();
   const decoder = new TextDecoder("utf-8");
   let aggregated = "";
   let leftover = "";
+  let sawEvent = false;
+  let thinkingChars = 0;
+  let stopReason: string | undefined;
   try {
     // eslint-disable-next-line no-constant-condition
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      // Any traffic proves the stream is alive — reset the idle clock on every
+      // chunk, not only text-bearing ones (thinking models can emit long
+      // non-text stretches before the first text_delta).
+      resetIdle();
       leftover += decoder.decode(value, { stream: true });
       // SSE events are separated by newlines; process every complete line and
       // keep the trailing partial in `leftover`.
       const lines = leftover.split(/\r?\n/);
       leftover = lines.pop() ?? "";
       for (const line of lines) {
-        const delta = extractTextDelta(line);
-        if (delta !== null) {
-          aggregated += delta;
-          resetIdle();
-        }
+        const meta = extractSseLineMeta(line);
+        if (meta.parsed) sawEvent = true;
+        if (meta.text !== null) aggregated += meta.text;
+        thinkingChars += meta.thinkingChars;
+        if (meta.stopReason !== undefined) stopReason = meta.stopReason;
       }
     }
     // Flush any trailing line (some servers omit the final newline).
     const tail = decoder.decode();
     leftover += tail;
     if (leftover.length > 0) {
-      const delta = extractTextDelta(leftover);
-      if (delta !== null) aggregated += delta;
+      const meta = extractSseLineMeta(leftover);
+      if (meta.parsed) sawEvent = true;
+      if (meta.text !== null) aggregated += meta.text;
+      thinkingChars += meta.thinkingChars;
+      if (meta.stopReason !== undefined) stopReason = meta.stopReason;
     }
   } catch (err) {
     clearTimers();
     if (timedOut) {
       // Timeout is a backend error (exit 1) per the contract, even when some
       // text was already received — callers must not treat a timed-out
-      // response as success.
-      return {
-        exitCode: 1,
-        stdout: "",
-        stderr: `gcli: api timed out after ${req.timeoutMs}ms`,
-      };
+      // response as success. Nothing has been emitted yet (stream output is
+      // aggregated before printing), so a retry would also be safe — but a
+      // request that already burned its whole time budget won't get one.
+      return { outcome: timeoutOutcome(), retryable: false };
     }
     const msg = err instanceof Error ? err.message : String(err);
     return {
-      exitCode: 1,
-      stdout: "",
-      stderr: `gcli: api stream read failed: ${msg}`,
+      outcome: {
+        exitCode: 1,
+        stdout: "",
+        stderr: `gcli: api stream read failed: ${msg}`,
+      },
+      retryable: `stream read failed: ${msg}`.slice(0, 120),
     };
   }
   clearTimers();
 
   if (!aggregated) {
+    if (!sawEvent) {
+      // Connection delivered no SSE events at all — transport-level flake.
+      return {
+        outcome: {
+          exitCode: 1,
+          stdout: "",
+          stderr:
+            "gcli: api stream produced no text (stream closed with no SSE events)",
+        },
+        retryable: "no SSE events",
+      };
+    }
+    const detail =
+      thinkingChars > 0
+        ? ` (thinking ~${thinkingChars}ch${stopReason ? `, stop_reason=${stopReason}` : ""}) — thinking consumed the whole max_tokens budget; raise --max-tokens or pass --thinking off`
+        : stopReason
+          ? ` (stop_reason=${stopReason})`
+          : "";
     return {
-      exitCode: 1,
-      stdout: "",
-      stderr: "gcli: api stream produced no text",
+      outcome: {
+        exitCode: 1,
+        stdout: "",
+        stderr: `gcli: api stream produced no text${detail}`,
+      },
+      retryable: false,
     };
   }
   // Streaming output is not truncated (real-time, contract §A); only the
   // non-stream path truncates.
-  return { exitCode: 0, stdout: aggregated, stderr: "" };
+  return {
+    outcome: { exitCode: 0, stdout: aggregated, stderr: "" },
+    retryable: false,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -2630,6 +2917,13 @@ api backend (\`gcli api ...\`) — pure HTTP, no agent, no subprocess:
       --max-tokens <n>    Output token budget (default 80000)
       --timeout <ms>      Idle + absolute timeout in ms (default 300000, max 1800000)
       --stream|--no-stream  Stream SSE and aggregate live (default stream)
+      --thinking <mode>   auto|off|on (default auto = omit the thinking field,
+                          endpoint default applies; off sends disabled; on
+                          sends enabled with budget = max_tokens/2, needs
+                          --max-tokens >= 2048)
+      --retry <n>         Auto retries for transient failures: network errors,
+                          HTTP 408/429/5xx, malformed JSON, empty content
+                          (default 1, max 5; exponential backoff 400ms..4s)
       --version           Print the api backend identity
       --help              Show this help
 
@@ -2637,8 +2931,14 @@ api backend (\`gcli api ...\`) — pure HTTP, no agent, no subprocess:
     - No --cwd (no file operations; supplied --cwd is warned + ignored).
     - --yolo/--sandbox are rejected (they are agent flags; api has no agent).
     - Unknown flags exit 2 (strict; nothing to forward to).
-    - thinking is left ENABLED (k3 quality source); use a sufficient
-      --max-tokens budget (default 80000) to cover thinking + text.
+    - thinking auto keeps the endpoint's own default. Beware bigmodel GLM
+      endpoints: thinking defaults ON there and shares the max_tokens budget
+      with text, so a small explicit budget can yield a thinking-only response
+      ("no text content ... blocks=[thinking], stop_reason=max_tokens").
+      Fix: raise --max-tokens or pass --thinking off (k3 quality workflows:
+      keep auto/on + a generous budget). Deterministic failures are never
+      retried; transient ones (network/408/429/5xx/empty body) are, with each
+      attempt noted on stderr.
 
 hermes backend (\`gcli hermes ...\`) — hermes agent 主模型/provider 一键切换:
   <provider>            cc-switch provider 名（exact/case/substring 三层匹配）;
@@ -3223,6 +3523,9 @@ async function runApiBackend(
     prompt,
     stream: parsed.stream,
     timeoutMs: parsed.timeoutMs,
+    // auto = omit the thinking field entirely (endpoint default)
+    thinking: parsed.thinking === "auto" ? undefined : parsed.thinking,
+    retries: parsed.retries,
   };
 
   const outcome = await deps.runApi(req);
