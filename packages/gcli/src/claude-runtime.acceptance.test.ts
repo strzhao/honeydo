@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { CHARACTER_LIMIT, run, truncate } from "./cli.js";
+import { run } from "./cli.js";
 
 // ============================================================================
 // 契约（DI 接口，蓝队按此实现 run 与 deps）—— 默认翻转覆盖版本：
@@ -33,7 +33,7 @@ import { CHARACTER_LIMIT, run, truncate } from "./cli.js";
 //   ACC-11 claude 非零退出 → exit 1，stderr 含 "claude failed"
 //   ACC-12 超时 → exit 1，stderr 含 "timed out"
 //   ACC-13 空输出 → exit 1，stderr 含 "no output"
-//   ACC-14 stdout>50000 → 含 "[Truncated"
+//   ACC-14 stdout 长输出 → 原样透传（无截断；量级限制归端点）
 //   ACC-15 db 缺失 / sqlite3 未装 → exit 1（非 2），stderr 含诊断
 //   ACC-16 `gcli claude -p -` / 默认 `gcli -p -` stdin piped → prompt=stdin 内容
 //   ACC-22 `gcli claude --yolo -p hi` / 默认 `gcli --yolo -p hi` → exit 2
@@ -360,8 +360,8 @@ describe("run() claude runtime errors // ACC-11/12/13/14 (default=claude, unchan
     expect(r.stderr).toContain("no output");
   });
 
-  it("ACC-14: claude stdout > 50000 chars → run stdout contains '[Truncated' and is shorter", async () => {
-    const long = "a".repeat(CHARACTER_LIMIT + 5000);
+  it("ACC-14: claude stdout 长输出 → run 原样透传（无截断）", async () => {
+    const long = "a".repeat(55_000) + "TAIL-MARKER";
     const deps = makeDeps({
       runClaude: vi.fn(
         async (): Promise<SpawnResult> => ({
@@ -373,15 +373,8 @@ describe("run() claude runtime errors // ACC-11/12/13/14 (default=claude, unchan
     });
     const r = await run(["claude", "-p", "hi"], deps);
     expect(r.exitCode).toBe(0);
-    expect(r.stdout).toContain("[Truncated");
-    expect(r.stdout.length).toBeLessThan(long.length);
-  });
-
-  it("ACC-14 (pure fn cross-check): truncate() is the mechanism and caps at CHARACTER_LIMIT", () => {
-    const long = "a".repeat(CHARACTER_LIMIT + 100);
-    const out = truncate(long);
-    expect(out).toContain("[Truncated");
-    expect(out.length).toBeLessThan(long.length);
+    expect(r.stdout).toBe(long);
+    expect(r.stdout).toContain("TAIL-MARKER");
   });
 });
 

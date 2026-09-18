@@ -98,7 +98,7 @@ gcli claude -p "hi" --verbose --any-claude-flag value       # print + pass-throu
 - `2` — bad arguments (also: no `-p` in a non-TTY)
 - `N` — interactive mode: the child's exit code is passed through unchanged (e.g. `130` for Ctrl-C)
 
-Output (print mode) is truncated to 50,000 characters (a `[Truncated]` marker is appended).
+Output (print mode) is passed through unmodified — no size cap on stdout; quantity limits (max_tokens 等) are enforced by the endpoint, not gcli.
 
 ## Develop
 

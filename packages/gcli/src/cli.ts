@@ -7,8 +7,9 @@
  * `gcli agy ...` routes to the agy CLI (explicit subcommand required); the
  * claude backend can switch cc-switch providers inline via
  * `claude -p ... --settings`. Adds value over calling the backends directly:
- * prompt via argv or stdin (`-p -`), 50k-char output truncation, a hard
- * timeout (spawn SIGTERM), explicit exit codes, and empty-output detection.
+ * prompt via argv or stdin (`-p -`), a hard timeout (spawn SIGTERM), explicit
+ * exit codes, and empty-output detection. Output is passed through unmodified
+ * — size limits are the endpoint's business, not ours.
  *
  * The claude backend resolves `--provider <name>` from the cc-switch SQLite
  * DB (read-only) and never rewrites ~/.claude/settings.json — the provider
@@ -44,7 +45,6 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 export const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes
-export const CHARACTER_LIMIT = 50_000;
 export const API_DEFAULT_MAX_TOKENS = 80000;
 const AGY_BIN = "agy";
 const CLAUDE_BIN = "claude";
@@ -265,7 +265,7 @@ export type RunDeps = {
    */
   runApi: (req: ApiRequest) => Promise<RunOutcome>;
   readStdin: () => Promise<string>;
-  // Interactive mode (no -p in a TTY): inherit stdio, no timeout/truncation,
+  // Interactive mode (no -p in a TTY): inherit stdio, no timeout,
   // pass the child's exit code through unchanged.
   runClaudeInteractive: (
     args: string[],
@@ -365,14 +365,6 @@ export function parseSubcommand(argv: string[]): SubcommandResult {
   if (first === "hermes") return { subcommand: "hermes", rest: argv.slice(1) };
   if (first.startsWith("-")) return { subcommand: undefined, rest: argv };
   return { error: `unknown subcommand: ${first}` };
-}
-
-export function truncate(text: string): string {
-  if (text.length <= CHARACTER_LIMIT) return text;
-  return (
-    text.slice(0, CHARACTER_LIMIT) +
-    `\n\n[Truncated — response exceeded ${CHARACTER_LIMIT} characters]`
-  );
 }
 
 export interface GcliOptions {
@@ -1605,9 +1597,9 @@ export function parseCliArgs(argv: string[]): ParseResult {
     let timeoutMs = DEFAULT_TIMEOUT_MS;
     if (values.timeout !== undefined) {
       const n = Number(values.timeout);
-      if (!Number.isFinite(n) || n < 1000 || n > 1_800_000) {
+      if (!Number.isFinite(n) || n < 1000) {
         return {
-          error: `--timeout must be a number in [1000, 1800000], got "${values.timeout}"`,
+          error: `--timeout must be a number >= 1000, got "${values.timeout}"`,
         };
       }
       timeoutMs = n;
@@ -1704,9 +1696,9 @@ export function parseApiArgs(argv: string[]): ParseApiResult {
     let maxTokens = API_DEFAULT_MAX_TOKENS;
     if (values["max-tokens"] !== undefined) {
       const n = Number(values["max-tokens"]);
-      if (!Number.isFinite(n) || n < 1 || n > 200_000) {
+      if (!Number.isFinite(n) || n < 1) {
         return {
-          error: `--max-tokens must be a number in [1, 200000], got "${values["max-tokens"]}"`,
+          error: `--max-tokens must be a finite number >= 1, got "${values["max-tokens"]}"`,
         };
       }
       maxTokens = n;
@@ -1715,9 +1707,9 @@ export function parseApiArgs(argv: string[]): ParseApiResult {
     let timeoutMs = DEFAULT_TIMEOUT_MS;
     if (values.timeout !== undefined) {
       const n = Number(values.timeout);
-      if (!Number.isFinite(n) || n < 1000 || n > 1_800_000) {
+      if (!Number.isFinite(n) || n < 1000) {
         return {
-          error: `--timeout must be a number in [1000, 1800000], got "${values.timeout}"`,
+          error: `--timeout must be a number >= 1000, got "${values.timeout}"`,
         };
       }
       timeoutMs = n;
@@ -1746,9 +1738,9 @@ export function parseApiArgs(argv: string[]): ParseApiResult {
     let retries = 1;
     if (values.retry !== undefined) {
       const n = Number(values.retry);
-      if (!Number.isInteger(n) || n < 0 || n > 5) {
+      if (!Number.isInteger(n) || n < 0) {
         return {
-          error: `--retry must be an integer in [0, 5], got "${values.retry}"`,
+          error: `--retry must be a non-negative integer, got "${values.retry}"`,
         };
       }
       retries = n;
@@ -1882,8 +1874,8 @@ export function runClaude(
 /**
  * Spawn a backend with stdio fully inherited (interactive TUI mode).
  *
- * Unlike runAgy/runClaude: no timeout, no stdout/stderr capture, no
- * truncation — the child owns the terminal. The child's exit code is passed
+ * Unlike runAgy/runClaude: no timeout, no stdout/stderr capture —
+ * the child owns the terminal. The child's exit code is passed
  * through unchanged (SIGINT→130, SIGTERM→143 per shell convention).
  */
 function spawnInteractive(
@@ -1967,7 +1959,7 @@ const API_RETRY_MAX_DELAY_MS = 4000;
  *   (timeoutMs). Either firing aborts the fetch via AbortController → exit 1
  *   with a timeout message.
  * - stream=false: awaits the full JSON body and extracts `content[].text`,
- *   then applies the 50k-char truncation.
+ *   returned as-is (no size cap — endpoint limits are the endpoint's call).
  *
  * TRANSIENT failures are retried automatically (default 1 retry, `--retry N`):
  * network-level fetch errors, HTTP 408/429/5xx, malformed JSON, empty-content
@@ -2145,7 +2137,7 @@ async function runApiAttempt(req: ApiRequest): Promise<ApiAttempt> {
       };
     }
     return {
-      outcome: { exitCode: 0, stdout: truncate(text), stderr: "" },
+      outcome: { exitCode: 0, stdout: text, stderr: "" },
       retryable: false,
     };
   }
@@ -2253,8 +2245,6 @@ async function runApiAttempt(req: ApiRequest): Promise<ApiAttempt> {
       retryable: false,
     };
   }
-  // Streaming output is not truncated (real-time, contract §A); only the
-  // non-stream path truncates.
   return {
     outcome: { exitCode: 0, stdout: aggregated, stderr: "" },
     retryable: false,
@@ -2851,11 +2841,11 @@ const HELP = `Usage:
   gcli hermes <provider|status|rollback> [options]  hermes agent 主模型一键切换
 
 gcli sits in front of three backends and gives skills a stable entry point:
-50k-char output truncation (agy/claude; api only when non-stream), a hard
-timeout, explicit exit codes, and stdin piping (\`-p -\`).
+a hard timeout, explicit exit codes, and stdin piping (\`-p -\`). Output is
+passed through unmodified — size limits are the endpoint's business.
 
 Without -p, the agy/claude backends launch their interactive TUI (inherited
-stdio; no timeout, no truncation; the child's exit code is passed through).
+stdio; no timeout; the child's exit code is passed through).
 This requires a TTY — piping into gcli without -p is an error (use '-p -' to
 pipe a prompt). The api backend is one-shot HTTP and always requires -p.
 
@@ -2870,7 +2860,7 @@ agy backend (\`gcli agy ...\` — the subcommand is REQUIRED; bare \`gcli\` is c
       --yolo              Auto-approve tool actions (agy --dangerously-skip-permissions)
       --sandbox           Run agy in sandbox mode
       --cwd <dir>         Working directory (added via agy --add-dir)
-      --timeout <ms>      Hard timeout in ms (default 300000, max 1800000)
+      --timeout <ms>      Hard timeout in ms (default 300000)
       --version           Print the agy version
       --help              Show this help
       -- <args...>        Pass remaining args through to agy verbatim
@@ -2881,7 +2871,7 @@ claude backend (default; bare \`gcli ...\` === \`gcli claude ...\`):
       --pick              Force the provider picker menu, even in print mode
       --model <name>      Override ANTHROPIC_MODEL in the provider env
       --cwd <dir>         Working directory (added via claude --add-dir)
-      --timeout <ms>      Hard timeout in ms (default 300000, max 1800000)
+      --timeout <ms>      Hard timeout in ms (default 300000)
       --version           Print the claude version
       --help              Show this help
       -- <args...>        Pass remaining args through to claude verbatim
@@ -2914,8 +2904,9 @@ api backend (\`gcli api ...\`) — pure HTTP, no agent, no subprocess:
   -p, --prompt <text|->   Prompt text, "-" for stdin (REQUIRED)
       --provider <name>   cc-switch provider (REQUIRED; supplies base URL/token/model)
       --model <name>      Override the provider's ANTHROPIC_MODEL
-      --max-tokens <n>    Output token budget (default 80000)
-      --timeout <ms>      Idle + absolute timeout in ms (default 300000, max 1800000)
+      --max-tokens <n>    Output token budget (default 80000; upper bound is
+                          whatever the endpoint accepts)
+      --timeout <ms>      Idle + absolute timeout in ms (default 300000)
       --stream|--no-stream  Stream SSE and aggregate live (default stream)
       --thinking <mode>   auto|off|on (default auto = omit the thinking field,
                           endpoint default applies; off sends disabled; on
@@ -2923,7 +2914,7 @@ api backend (\`gcli api ...\`) — pure HTTP, no agent, no subprocess:
                           --max-tokens >= 2048)
       --retry <n>         Auto retries for transient failures: network errors,
                           HTTP 408/429/5xx, malformed JSON, empty content
-                          (default 1, max 5; exponential backoff 400ms..4s)
+                          (default 1; exponential backoff 400ms..4s)
       --version           Print the api backend identity
       --help              Show this help
 
@@ -2989,14 +2980,12 @@ function mapSpawnResult(
     return {
       exitCode: 1,
       stdout: "",
-      stderr: `gcli: ${backend} failed (exit ${result.exitCode})\n${truncate(
-        errInfo,
-      )}`,
+      stderr: `gcli: ${backend} failed (exit ${result.exitCode})\n${errInfo}`,
     };
   }
   if (!out) {
     const info = result.stderr.trim()
-      ? `stderr: ${truncate(result.stderr)}`
+      ? `stderr: ${result.stderr}`
       : "no output";
     return {
       exitCode: 1,
@@ -3004,7 +2993,7 @@ function mapSpawnResult(
       stderr: `gcli: ${backend} returned ${info}`,
     };
   }
-  return { exitCode: 0, stdout: truncate(out), stderr: "" };
+  return { exitCode: 0, stdout: out, stderr: "" };
 }
 
 async function runAgyBackend(

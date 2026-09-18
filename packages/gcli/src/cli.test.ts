@@ -9,7 +9,6 @@ import {
   buildClaudeArgs,
   buildCronRepinPlan,
   buildQuotaRequest,
-  CHARACTER_LIMIT,
   deriveHermesId,
   deriveKeyEnv,
   describeNoTextBody,
@@ -37,7 +36,6 @@ import {
   serializeHermesRegistry,
   serializeHermesStateFile,
   stripContextSuffix,
-  truncate,
   upsertEnvLines,
 } from "./cli.js";
 
@@ -45,26 +43,6 @@ function ok(r: ParseResult) {
   if ("error" in r) throw new Error(`unexpected parse error: ${r.error}`);
   return r;
 }
-
-describe("truncate", () => {
-  it("returns short text unchanged", () => {
-    const text = "Hello, world!";
-    expect(truncate(text)).toBe(text);
-  });
-
-  it("returns text at exactly the limit unchanged", () => {
-    const text = "a".repeat(CHARACTER_LIMIT);
-    expect(truncate(text)).toBe(text);
-  });
-
-  it("truncates text exceeding the limit", () => {
-    const text = "a".repeat(CHARACTER_LIMIT + 100);
-    const result = truncate(text);
-    expect(result.length).toBeLessThan(text.length);
-    expect(result).toContain("[Truncated");
-    expect(result.startsWith("a".repeat(CHARACTER_LIMIT))).toBe(true);
-  });
-});
 
 describe("buildAgyArgs", () => {
   const base = { yolo: false, sandbox: false, timeoutMs: 300_000 };
@@ -155,10 +133,9 @@ describe("parseCliArgs", () => {
     expect("error" in parseCliArgs(["-p", "hi", "--timeout", "10"])).toBe(true);
   });
 
-  it("rejects timeout above the ceiling", () => {
-    expect("error" in parseCliArgs(["-p", "hi", "--timeout", "9999999"])).toBe(
-      true,
-    );
+  it("accepts a large timeout (no ceiling — endpoint owns duration limits)", () => {
+    const r = ok(parseCliArgs(["-p", "hi", "--timeout", "9999999"]));
+    expect(r.timeoutMs).toBe(9999999);
   });
 
   it("allows a missing prompt (run() owns that error path)", () => {
@@ -606,6 +583,20 @@ describe("parseApiArgs (strict, no passthrough)", () => {
       "error" in
         parseApiArgs(["-p", "hi", "--provider", "kimi", "--max-tokens", "0"]),
     ).toBe(true);
+  });
+
+  it("accepts a huge --max-tokens (no ceiling — endpoint owns the real limit)", () => {
+    const r = ok(
+      parseApiArgs([
+        "-p",
+        "hi",
+        "--provider",
+        "kimi",
+        "--max-tokens",
+        "1000000",
+      ]),
+    );
+    expect(r.maxTokens).toBe(1000000);
   });
 
   it("flips stream to false with --no-stream", () => {
@@ -1350,11 +1341,7 @@ describe("parseApiArgs --thinking/--retry", () => {
     if (!("error" in r5)) expect(r5.retries).toBe(5);
   });
 
-  it("rejects out-of-range / non-integer --retry", () => {
-    expect(
-      "error" in
-        parseApiArgs(["-p", "hi", "--provider", "kimi", "--retry", "6"]),
-    ).toBe(true);
+  it("rejects non-integer --retry (any non-negative integer count is allowed)", () => {
     expect(
       "error" in
         parseApiArgs(["-p", "hi", "--provider", "kimi", "--retry", "1.5"]),
@@ -1363,6 +1350,10 @@ describe("parseApiArgs --thinking/--retry", () => {
       "error" in
         parseApiArgs(["-p", "hi", "--provider", "kimi", "--retry", "x"]),
     ).toBe(true);
+    const r20 = ok(
+      parseApiArgs(["-p", "hi", "--provider", "kimi", "--retry", "20"]),
+    );
+    expect(r20.retries).toBe(20);
   });
 });
 
@@ -1495,6 +1486,22 @@ describe("runApi retries and diagnostics", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("non-stream long text (>50k chars): returned in full, NOT truncated", async () => {
+    const long = "a".repeat(55_000) + "TAIL-MARKER";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({
+          content: [{ type: "text", text: long }],
+          stop_reason: "end_turn",
+        }),
+      ),
+    );
+    const out = await runApi(req());
+    expect(out.exitCode).toBe(0);
+    expect(out.stdout).toBe(long);
   });
 
   it("non-stream success on first attempt (no retry notes)", async () => {
