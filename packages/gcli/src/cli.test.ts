@@ -283,7 +283,11 @@ describe("quota helpers // C-Q1..C-Q3", () => {
     const mixed = parseGlmQuota({
       data: {
         limits: [
-          { type: "CREDIT_LIMIT", percentage: 75, nextResetTime: 1790067733980 },
+          {
+            type: "CREDIT_LIMIT",
+            percentage: 75,
+            nextResetTime: 1790067733980,
+          },
           { type: "TIME_LIMIT", percentage: 80, nextResetTime: 1789786503998 },
           { type: "TOKENS_LIMIT", percentage: 4, nextResetTime: 1789736689944 },
         ],
@@ -439,9 +443,7 @@ describe("picker 帧渲染 // renderPickerRows", () => {
   it("彩色：标题 cyan+bold、键位/分隔线/末行 dim", () => {
     const rows = renderPickerRows(ENTRIES, 0, false);
     expect(rows[0]).toBe("\x1b[36m\x1b[1m◆ gcli\x1b[0m · 选择 provider");
-    expect(rows[1]).toBe(
-      "\x1b[2m↑↓/j/k 移动 · Enter 确认 · Esc 退出\x1b[22m",
-    );
+    expect(rows[1]).toBe("\x1b[2m↑↓/j/k 移动 · Enter 确认 · Esc 退出\x1b[22m");
     expect(rows[2]).toBe(`\x1b[2m${"─".repeat(50)}\x1b[22m`);
     expect(rows[rows.length - 1]).toBe("\x1b[2mEsc 退出\x1b[22m");
   });
