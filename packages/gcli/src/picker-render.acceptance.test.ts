@@ -184,7 +184,7 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("首绘 B 骨架 // 视觉规格 1", () => {
-  it("标题两行 + `─`×50 分隔线 + 3 条目 + 末行 `Esc 不切换`，恰 7 行；旧文案消失", async () => {
+  it("标题两行 + `─`×50 分隔线 + 3 条目 + 末行 `Esc 退出`，恰 7 行；旧文案消失", async () => {
     vi.stubEnv("NO_COLOR", ""); // 对照组：强制非 NO_COLOR（空串 ≠ 非空）
     const cap = makeCapture();
     const deps = makeDeps({ keys: [{ name: "escape" }] });
@@ -198,13 +198,13 @@ describe("首绘 B 骨架 // 视觉规格 1", () => {
     expect(text).toContain(CYAN);
     expect(text).toContain(BOLD);
     // 标题行 2（dim）
-    expect(text).toContain("↑↓/j/k 移动 · Enter 确认 · Esc 不切换");
+    expect(text).toContain("↑↓/j/k 移动 · Enter 确认 · Esc 退出");
     expect(text).toContain(DIM);
     // 结构恰 7 行：标题2 + 分隔线1 + 条目3 + 末行1
     const lines = cap.lines();
     expect(lines).toHaveLength(7);
     expect(lines.filter((l) => l === "─".repeat(50))).toHaveLength(1);
-    expect(lines[lines.length - 1]).toBe("Esc 不切换");
+    expect(lines[lines.length - 1]).toBe("Esc 退出");
     for (const name of NAMES) {
       expect(lines.some((l) => l.includes(name))).toBe(true);
     }
@@ -376,20 +376,20 @@ describe("键位契约 // 生产 picker 端到端", () => {
     expect(r.stdout).toBe("");
   });
 
-  it("escape → skip：不写记忆、以默认配置 spawn（不注入 provider settings）", async () => {
+  it("escape → skip：不写记忆、不 spawn 任何后端、exit 0 + 退出提示", async () => {
     vi.stubEnv("NO_COLOR", "");
     const cap = makeCapture();
     const deps = makeDeps({ keys: [{ name: "escape" }] });
     const r = await run([], deps);
     cap.spy.mockRestore();
+    // 语义变更（2026-09 用户裁定）：Esc = 退出，不启动 claude
     expect(r.exitCode).toBe(0);
-    // 契约 1：Esc = 不切换 → 不动 memory，但仍以 claude 默认配置照常启动
     expect(deps.writeLastProvider).toHaveBeenCalledTimes(0);
-    expect(deps.runClaudeInteractive).toHaveBeenCalledTimes(1);
-    // 「默认配置」的接缝投影：args 无 --settings（与选中 provider 的 spawn 区分）
-    const args = deps.runClaudeInteractive.mock.calls[0][0] as string[];
-    expect(args).not.toContain("--settings");
-    expect(args).not.toContain("-p");
+    expect(deps.runClaudeInteractive).toHaveBeenCalledTimes(0);
+    expect(deps.runClaude).toHaveBeenCalledTimes(0);
+    expect(r.stdout).toBe("");
+    // 退出反馈：stderr 有确认提示（防「按了没反应」体验）
+    expect(r.stderr).toContain("已退出");
   });
 });
 

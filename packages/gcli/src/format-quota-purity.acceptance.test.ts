@@ -5,7 +5,7 @@ import { formatQuota } from "./cli.js";
 // 红队验收 — 契约规约 4「formatQuota 纯文本输出逐字节不变」（P5 支撑）
 //
 // 断言独立推导自 state.md ## 契约规约 4 + context.md 相关历史知识
-// （现有单测锁定的字面量 "5h:42% wk:17% ↻2h13m" 等），零实现代码读取。
+// （现有单测锁定的字面量 "5h:42% ↻2h13m wk:17% ↻2d2h" 等），零实现代码读取。
 //
 // 本文件在改动前基线即为绿：既是 harness 可执行性证明，也是
 // 「formatQuota 重构为 quotaParts 拼接」的回归金丝雀——重构后任何
@@ -26,7 +26,7 @@ describe("formatQuota 无色纯文本 // 契约 4（P5 支撑）", () => {
         },
         NOW,
       ),
-    ).toBe("5h:42% wk:17% ↻2h13m");
+    ).toBe("5h:42% ↻2h13m wk:17% ↻2d2h");
     expect(formatQuota({ short: { pct: 7, resetIso: at(240) } }, NOW)).toBe(
       "5h:7% ↻4h",
     );

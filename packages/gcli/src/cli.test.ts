@@ -34,6 +34,7 @@ import {
   parseHermesStateFile,
   parseKimiUsages,
   parseSubcommand,
+  pickProviderInteractive,
   QUOTA_HIGH,
   QUOTA_MID,
   renderPickerRows,
@@ -303,13 +304,23 @@ describe("quota helpers // C-Q1..C-Q3", () => {
         },
         NOW,
       ),
-    ).toBe("5h:42% wk:17% ↻2h13m");
+    ).toBe("5h:42% ↻2h13m wk:17% ↻2d2h");
     expect(formatQuota({ short: { pct: 7, resetIso: at(240) } }, NOW)).toBe(
       "5h:7% ↻4h",
     );
     expect(formatQuota({ short: { pct: 1, resetIso: at(-5) } }, NOW)).toBe(
       "5h:1%",
     );
+    // 两窗 reset 独立降级：短窗过期省略 ↻，周窗正常显示
+    expect(
+      formatQuota(
+        {
+          short: { pct: 1, resetIso: at(-5) },
+          weekly: { pct: 17, resetIso: at(90) },
+        },
+        NOW,
+      ),
+    ).toBe("5h:1% wk:17% ↻1h30m");
     expect(formatQuota({}, NOW)).toBe("");
   });
 });
@@ -384,9 +395,9 @@ describe("picker 帧渲染 // renderPickerRows", () => {
     const rows = renderPickerRows(ENTRIES, 0, true);
     expect(rows).toHaveLength(2 + 1 + ENTRIES.length + 1);
     expect(rows[0]).toBe("◆ gcli · 选择 provider");
-    expect(rows[1]).toBe("↑↓/j/k 移动 · Enter 确认 · Esc 不切换");
+    expect(rows[1]).toBe("↑↓/j/k 移动 · Enter 确认 · Esc 退出");
     expect(rows[2]).toBe("─".repeat(50));
-    expect(rows[rows.length - 1]).toBe("Esc 不切换");
+    expect(rows[rows.length - 1]).toBe("Esc 退出");
   });
 
   it("NO_COLOR：全帧零 ANSI，❯ 缩进 + name 列对齐 + — 占位 + ●tag 保留", () => {
@@ -429,10 +440,10 @@ describe("picker 帧渲染 // renderPickerRows", () => {
     const rows = renderPickerRows(ENTRIES, 0, false);
     expect(rows[0]).toBe("\x1b[36m\x1b[1m◆ gcli\x1b[0m · 选择 provider");
     expect(rows[1]).toBe(
-      "\x1b[2m↑↓/j/k 移动 · Enter 确认 · Esc 不切换\x1b[22m",
+      "\x1b[2m↑↓/j/k 移动 · Enter 确认 · Esc 退出\x1b[22m",
     );
     expect(rows[2]).toBe(`\x1b[2m${"─".repeat(50)}\x1b[22m`);
-    expect(rows[rows.length - 1]).toBe("\x1b[2mEsc 不切换\x1b[22m");
+    expect(rows[rows.length - 1]).toBe("\x1b[2mEsc 退出\x1b[22m");
   });
 });
 
@@ -521,6 +532,33 @@ describe("buildClaudeArgs", () => {
     const args = buildClaudeArgs({ prompt: "hi" });
     expect(args.some((a) => a.includes("timeout"))).toBe(false);
   });
+});
+
+describe("pickProviderInteractive 孤立 ESC 快速路径", () => {
+  it("真实终端孤立 ESC 字节（\\x1b 单字节 data）→ 50ms 后 skip", async () => {
+    const p = pickProviderInteractive([{ name: "A" }, { name: "B" }], 0);
+    await new Promise((r) => setImmediate(r)); // 等 listener 注册
+    process.stdin.emit("data", "\x1b");
+    const outcome = await p;
+    expect(outcome).toEqual({ kind: "skip" });
+  });
+
+  it("ESC 后 50ms 内跟随 [A（箭头序列拆包）→ 不 skip，交还 readline", async () => {
+    const p = pickProviderInteractive([{ name: "A" }, { name: "B" }], 0);
+    await new Promise((r) => setImmediate(r));
+    process.stdin.emit("data", "\x1b");
+    process.stdin.emit("data", "[A"); // 50ms 内到达 → 取消 timer
+    const outcome = await Promise.race([
+      p.then((o) => ({ resolved: o as unknown })),
+      new Promise<{ stillPending: true }>((r) =>
+        setTimeout(() => r({ stillPending: true }), 120),
+      ),
+    ]);
+    expect(outcome).toEqual({ stillPending: true });
+    // 收尾：确认后清理（任意键触发 confirm 结束 promise，防泄漏）
+    process.stdin.emit("keypress", "", { name: "return" });
+    await p;
+  }, 5000);
 });
 
 describe("applyPickerKey", () => {

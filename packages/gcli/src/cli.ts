@@ -278,9 +278,9 @@ export type RunDeps = {
   isInteractive: () => boolean;
   /**
    * TTY-only arrow-key provider picker (C-P1/C-P3): present the cc-switch
-   * provider entries (the production impl appends its own trailing 不切换
+   * provider entries (the production impl renders a dim Esc 退出 footer;
    * row — `entries` holds providers only) and resolve the confirmed entry,
-   * or {kind:"skip"} on Esc / the 不切换 row. `initialIndex` is the caller-
+   * or {kind:"skip"} on Esc/C-g (= 退出，不启动后端). `initialIndex` is the caller-
    * computed row to highlight (memory hit or 0); implementations clamp it.
    * Only ever invoked on the claude path in a TTY with no --provider —
    * non-interactive callers (skills/CI/pipes) must see zero prompts and
@@ -493,7 +493,7 @@ export type PickerKeyInput = { name?: string; ctrl?: boolean; meta?: boolean };
  * - "return" / "enter" → confirm the current row (the physical Enter key
  *   emits "return" in raw mode; "enter" is the LF byte, which a tty may
  *   substitute for CR in input buffered before raw mode was enabled)
- * - "escape"     → skip (不切换)
+ * - "escape"     → skip (退出，不启动后端)
  * - Emacs (revise-2): ctrl+"n" ≡ down, ctrl+"p" ≡ up (same wrap); ctrl+"g"
  *   ≡ escape → skip; meta+"<" → first row (absolute), meta+">" → last row
  *   (absolute). Horizontal Emacs keys (C-f/C-b/C-a/C-e) and paging (C-v/M-v)
@@ -502,7 +502,7 @@ export type PickerKeyInput = { name?: string; ctrl?: boolean; meta?: boolean };
  *   exit 130)
  *
  * `index` is the highlighted row, `count` the total rendered rows INCLUDING
- * the trailing 不切换 row. Movement wraps with `(index±1+count)%count`; with
+ * the footer row. Movement wraps with `(index±1+count)%count`; with
  * count <= 0 moves are a noop (nothing is rendered).
  */
 export function applyPickerKey(
@@ -715,40 +715,60 @@ function formatReset(
 
 /**
  * Structured render input shared by the plain and the colored quota
- * renderers: one percentage per window + the already-formatted relative
- * reset (short window preferred). No windows at all → no reset either (the
- * plain join then yields "").
+ * renderers: one percentage + one relative reset per window (each window's
+ * reset computed independently; missing/expired → omitted for that window).
+ * No windows at all → empty parts (the plain join then yields "").
  */
 function quotaParts(
   q: QuotaWindows,
   nowMs: number,
-): { shortPct?: number; weeklyPct?: number; resetRel?: string } {
+): {
+  shortPct?: number;
+  weeklyPct?: number;
+  shortResetRel?: string;
+  weeklyResetRel?: string;
+} {
   const shortPct = q.short?.pct;
   const weeklyPct = q.weekly?.pct;
   if (shortPct === undefined && weeklyPct === undefined) return {};
   return {
     shortPct,
     weeklyPct,
-    resetRel: formatReset(q.short?.resetIso ?? q.weekly?.resetIso, nowMs),
+    shortResetRel:
+      q.short === undefined ? undefined : formatReset(q.short.resetIso, nowMs),
+    weeklyResetRel:
+      q.weekly === undefined
+        ? undefined
+        : formatReset(q.weekly.resetIso, nowMs),
   };
 }
 
 /**
- * Format quota windows as the menu subtitle (C-Q3): `5h:P% wk:P% ↻<rel>`
- * (short reset preferred for the ↻ segment); missing windows degrade; a
- * missing/expired reset omits the ↻ segment entirely; no windows → "".
- * Byte-exact contract with downstream consumers — the plain-text output is
- * locked by unit tests; colors live in `colorQuota`, never here.
+ * Format quota windows as the menu subtitle (C-Q3, 2026-09 双窗重置):
+ * `5h:P% ↻<rel> wk:P% ↻<rel>` — each window carries its own reset time.
+ * Missing windows degrade; a missing/expired reset omits that window's ↻;
+ * no windows → "". Byte-exact contract with downstream consumers — the
+ * plain-text output is locked by unit tests; colors live in `colorQuota`,
+ * never here.
  */
 export function formatQuota(q: QuotaWindows, nowMs: number): string {
   const p = quotaParts(q, nowMs);
   const parts: string[] = [];
-  if (p.shortPct !== undefined) parts.push(`5h:${p.shortPct}%`);
-  if (p.weeklyPct !== undefined) parts.push(`wk:${p.weeklyPct}%`);
-  if (parts.length === 0) return "";
-  return p.resetRel === undefined
-    ? parts.join(" ")
-    : `${parts.join(" ")} ↻${p.resetRel}`;
+  if (p.shortPct !== undefined) {
+    parts.push(
+      p.shortResetRel === undefined
+        ? `5h:${p.shortPct}%`
+        : `5h:${p.shortPct}% ↻${p.shortResetRel}`,
+    );
+  }
+  if (p.weeklyPct !== undefined) {
+    parts.push(
+      p.weeklyResetRel === undefined
+        ? `wk:${p.weeklyPct}%`
+        : `wk:${p.weeklyPct}% ↻${p.weeklyResetRel}`,
+    );
+  }
+  return parts.join(" ");
 }
 
 // Limit 染色阈值（对齐 statusline-sage 的 GLM_HIGH/GLM_MID）。
@@ -774,25 +794,29 @@ export function levelColor(pct: number): string {
 }
 
 /**
- * `formatQuota` 的染色版（picker 用）：`5h:P%`/`wk:P%` 每个窗口段按各自 pct
- * 独立选色；`↻<rel>` 段恒 dim，不参与染色。结构与降级规则和 `formatQuota`
- * 一致（无窗口 → ""）。行内使用 `\x1b[39m`/`\x1b[22m` 收尾而非全复位，
- * 以免抹掉选中行背景。
+ * `formatQuota` 的染色版（picker 用）：`5h:P% ↻rel`/`wk:P% ↻rel` 每个窗口段
+ * 按各自 pct 独立选色，各自的重置时间恒 dim，不参与染色。结构与降级规则和
+ * `formatQuota` 一致（无窗口 → ""）。行内使用 `\x1b[39m`/`\x1b[22m` 收尾而
+ * 非全复位，以免抹掉选中行背景。
  */
 export function colorQuota(q: QuotaWindows, nowMs: number): string {
   const p = quotaParts(q, nowMs);
   const parts: string[] = [];
   if (p.shortPct !== undefined) {
-    parts.push(`${levelColor(p.shortPct)}5h:${p.shortPct}%${FG_OFF}`);
+    parts.push(
+      p.shortResetRel === undefined
+        ? `${levelColor(p.shortPct)}5h:${p.shortPct}%${FG_OFF}`
+        : `${levelColor(p.shortPct)}5h:${p.shortPct}%${FG_OFF} \x1b[2m↻${p.shortResetRel}\x1b[22m`,
+    );
   }
   if (p.weeklyPct !== undefined) {
-    parts.push(`${levelColor(p.weeklyPct)}wk:${p.weeklyPct}%${FG_OFF}`);
+    parts.push(
+      p.weeklyResetRel === undefined
+        ? `${levelColor(p.weeklyPct)}wk:${p.weeklyPct}%${FG_OFF}`
+        : `${levelColor(p.weeklyPct)}wk:${p.weeklyPct}%${FG_OFF} \x1b[2m↻${p.weeklyResetRel}\x1b[22m`,
+    );
   }
-  if (parts.length === 0) return "";
-  const body = parts.join(" ");
-  return p.resetRel === undefined
-    ? body
-    : `${body} \x1b[2m↻${p.resetRel}\x1b[22m`;
+  return parts.join(" ");
 }
 
 export interface ClaudeOptions {
@@ -2466,8 +2490,8 @@ const SELECTED_BG = "\x1b[48;2;41;46;66m";
 
 const PICKER_TITLE_MAIN = "◆ gcli";
 const PICKER_TITLE_SUB = " · 选择 provider";
-const PICKER_HINT_KEYS = "↑↓/j/k 移动 · Enter 确认 · Esc 不切换";
-const PICKER_HINT_SKIP = "Esc 不切换";
+const PICKER_HINT_KEYS = "↑↓/j/k 移动 · Enter 确认 · Esc 退出";
+const PICKER_HINT_SKIP = "Esc 退出";
 const PICKER_SEPARATOR = "─".repeat(50);
 const NO_QUOTA_MARK = "—";
 
@@ -2531,7 +2555,7 @@ function pickerEntryRow(
 
 /**
  * The full picker frame as plain lines: 标题 2 行 + dim 分隔线 + 条目 N 行 +
- * dim 末行提示 (`Esc 不切换`, non-selectable — skip 只经 Esc/C-g). Pure:
+ * dim 末行提示 (`Esc 退出`, non-selectable — skip 只经 Esc/C-g（skip = 退出不启动）). Pure:
  * no I/O; with `noColor` (NO_COLOR downgrade) zero ANSI escapes — 仅纯文本
  * 排版，❯ 缩进 + 列对齐保留。Redraw cursor-up height = `entries.length + 4`.
  */
@@ -2563,7 +2587,7 @@ export function renderPickerRows(
  * Production deps.pickProvider: arrow-key menu rendered entirely on stderr
  * (stdout stays pipe-clean). ↑↓/j/k move with wrap, Enter confirms, Esc
  * skips, ctrl-c restores the terminal then exits 130; any other key is a
- * noop (C-P1). Frame = 标题 2 行 + 分隔线 + 条目 N 行 + dim `Esc 不切换`
+ * noop (C-P1). Frame = 标题 2 行 + 分隔线 + 条目 N 行 + dim `Esc 退出`
  * 末行提示——旧的可选中「不切换」行已退化为提示（skip 走 Esc/C-g），移动
  * 只覆盖条目行。
  *
@@ -2616,10 +2640,38 @@ export function pickProviderInteractive(
       | undefined;
     let onGone: () => void = () => {};
 
+    // 孤立 ESC 快速路径：emitKeypressEvents 不带 interface 参数时没有 escape
+    // 消歧超时，真实终端按 Esc 发出的孤立 \x1b 会被状态机无限挂起（keypress
+    // 永不发出）——实测 PTY 下 30s 无事件。因此监听 data 层：单字节 \x1b 且
+    // 50ms 内无后续字节 → 视为 Esc 键 skip；有后续（箭头序列拆包等）→ 取消
+    // 计时器交还 readline 正常解析。readline 的 name==="escape" 路径保留，
+    // settled 守卫防双触发。
+    let escTimer: ReturnType<typeof setTimeout> | undefined;
+    const onDataFastEsc = (chunk: string | Buffer): void => {
+      const s = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+      if (s !== "\x1b") {
+        if (escTimer !== undefined) {
+          clearTimeout(escTimer);
+          escTimer = undefined;
+        }
+        return;
+      }
+      if (escTimer !== undefined) clearTimeout(escTimer);
+      escTimer = setTimeout(() => {
+        escTimer = undefined;
+        finish({ kind: "skip" });
+      }, 50);
+    };
+
     const cleanup = (): void => {
       if (onKeypress !== undefined) {
         stdin.removeListener("keypress", onKeypress);
       }
+      if (escTimer !== undefined) {
+        clearTimeout(escTimer);
+        escTimer = undefined;
+      }
+      stdin.removeListener("data", onDataFastEsc);
       stdin.removeListener("close", onGone);
       stdin.removeListener("error", onGone);
       // emitKeypressEvents lazily attaches an internal 'data' listener (via
@@ -2680,6 +2732,7 @@ export function pickProviderInteractive(
     // skip rather than hang.
     onGone = (): void => finish({ kind: "skip" });
     stdin.on("keypress", onKeypress);
+    stdin.on("data", onDataFastEsc);
     stdin.once("close", onGone);
     stdin.once("error", onGone);
     if (stdin.isTTY) stdin.setRawMode(true);
@@ -3045,8 +3098,8 @@ claude backend (default; bare \`gcli ...\` === \`gcli claude ...\`):
       does NOT rewrite ~/.claude/settings.json.
     - No --provider in a TTY: gcli lists all cc-switch providers (in
       cc-switch's own DB order) in an arrow-key picker (↑↓/j/k and Emacs
-      C-n/C-p move · Enter 确认 · Esc/C-g = 不切换, keep claude's default
-      config; M-</M-> jump to first/last; ctrl-c exits 130). In print mode
+      C-n/C-p move · Enter 确认 · Esc/C-g = 退出（不启动 claude）;
+      M-</M-> jump to first/last; ctrl-c exits 130). In print mode
       (-p) the last confirmed provider is reused silently (one stderr hint
       line); the menu only pops when nothing valid is remembered, or when
       --pick is given. Without a TTY the picker never triggers — no prompt,
@@ -3333,6 +3386,7 @@ async function runClaudeBackend(
   }
 
   let settingsEnv: Record<string, string> | undefined;
+  let pickerSkipped = false;
   let pickerWarning: string | undefined;
   if (parsed.provider !== undefined) {
     const validated = validateProviderName(parsed.provider);
@@ -3470,8 +3524,10 @@ async function runClaudeBackend(
               // D2: write AFTER the picker confirm, BEFORE any spawn.
               await deps.writeLastProvider(picked.entry.name);
             }
+          } else {
+            pickerSkipped = true; // Esc/C-g → 退出，不启动 claude
           }
-          // skip → keep claude's default config; memory untouched.
+          // skip 语义（2026-09 用户裁定）：退出。memory untouched.
         }
       }
     }
@@ -3492,6 +3548,16 @@ async function runClaudeBackend(
           ...o,
           stderr: o.stderr ? `${pickerWarning}\n${o.stderr}` : pickerWarning,
         };
+
+  // Esc/C-g skip = 退出（2026-09 用户裁定，替代旧「不切换照常启动」语义）：
+  // 不 spawn 任何后端，干净退出 exit 0。stderr 提示确认动作已被感知。
+  if (pickerSkipped) {
+    return withPickerWarning({
+      exitCode: 0,
+      stdout: "",
+      stderr: "gcli: 已退出（未启动 claude）",
+    });
+  }
 
   const cwdAbs = parsed.cwd ? resolve(parsed.cwd) : undefined;
 

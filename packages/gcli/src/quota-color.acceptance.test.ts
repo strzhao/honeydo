@@ -61,7 +61,7 @@ describe("P1 染色阈值 // colorQuota / levelColor", () => {
     ).toContain(GREEN);
   });
 
-  it("染色不破坏可见文本：5h:/wk:/↻ 段与 formatQuota 同构且次序不变", () => {
+  it("染色不破坏可见文本：5h: ↻ wk: ↻ 与 formatQuota 同构且次序不变", () => {
     const plain = formatQuota(
       {
         short: { pct: 91, resetIso: FUTURE_SHORT },
@@ -83,8 +83,10 @@ describe("P1 染色阈值 // colorQuota / levelColor", () => {
       expect(plain).toContain(seg);
       expect(out.indexOf(seg)).toBeGreaterThan(-1);
     }
-    expect(out.indexOf("5h:")).toBeLessThan(out.indexOf("wk:"));
-    expect(out.indexOf("wk:")).toBeLessThan(out.indexOf("↻"));
+    // 双窗新格式：5h: < 短窗↻ < wk: < 周窗↻（每窗自带重置时间）
+    expect(out.indexOf("5h:")).toBeLessThan(out.indexOf("↻2h13m"));
+    expect(out.indexOf("↻2h13m")).toBeLessThan(out.indexOf("wk:"));
+    expect(out.indexOf("wk:")).toBeLessThan(out.lastIndexOf("↻"));
   });
 
   it("↻<rel> 段恒 dim：rel 段紧前存在 dim 码，不沾窗色", () => {

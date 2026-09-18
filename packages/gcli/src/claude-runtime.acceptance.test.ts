@@ -80,14 +80,18 @@ function makeDeps(
     readCcSwitchProvider:
       overrides.readCcSwitchProvider ??
       vi.fn(async () => ({ ok: true as const, providers: [K3_RAW] })),
-    // C-D3 新增必填接缝；默认 skip → 不注入 settings（签名按 picker v2 适配）
+    // C-D3 新增必填接缝；默认 select 第一项（INT 系列测 spawn 转发的正常
+    // 路径）。skip 语义（2026-09 起 = 退出不启动）由 SKIP-EXIT 专测覆盖。
     pickProvider:
       overrides.pickProvider ??
       vi.fn(
         async (
-          _entries: { name: string; host?: string }[],
+          entries: { name: string }[],
           _initialIndex: number,
-        ): Promise<{ kind: "skip" }> => ({ kind: "skip" }),
+        ): Promise<{ kind: "select"; entry: { name: string } }> => ({
+          kind: "select",
+          entry: entries[0]!,
+        }),
       ),
     // picker v2 新增记忆接缝；默认无记忆
     readLastProvider: vi.fn(async (): Promise<string | undefined> => undefined),

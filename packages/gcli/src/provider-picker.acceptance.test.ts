@@ -957,7 +957,7 @@ describe("formatQuota // C-Q3 格式与相对时长", () => {
   const at = (offsetMin: number): string =>
     new Date(NOW + offsetMin * 60_000).toISOString();
 
-  it("双窗：5h:P% wk:P% ↻<rel>（rel=短窗 reset）", () => {
+  it("双窗：每窗自带 ↻（5h:P% ↻rel wk:P% ↻rel）", () => {
     expect(
       formatQuota(
         {
@@ -966,7 +966,7 @@ describe("formatQuota // C-Q3 格式与相对时长", () => {
         },
         NOW,
       ),
-    ).toBe("5h:42% wk:17% ↻2h13m");
+    ).toBe("5h:42% ↻2h13m wk:17% ↻2d2h");
   });
 
   it("仅短窗：5h:P% ↻<rel>", () => {
