@@ -663,7 +663,9 @@ export function parseKimiUsages(body: unknown): QuotaWindows {
 
 /**
  * Parse GLM `/api/monitor/usage/quota/limit` (C-Q2): data.limits[] entries
- * with type == "TOKENS_LIMIT"; sorted by nextResetTime ascending — first is
+ * with type "TOKENS_LIMIT" (coding-plan 订阅) or "CREDIT_LIMIT" (credit 资源
+ * 包) — billing type is per-account, fields are identical, same rendering
+ * (parity with statusline-sage); sorted by nextResetTime ascending — first is
  * the short (5h) window, last the weekly one.
  */
 export function parseGlmQuota(body: unknown): QuotaWindows {
@@ -677,7 +679,7 @@ export function parseGlmQuota(body: unknown): QuotaWindows {
   for (const item of limits) {
     if (typeof item !== "object" || item === null) continue;
     const r = item as Record<string, unknown>;
-    if (r.type !== "TOKENS_LIMIT") continue;
+    if (r.type !== "TOKENS_LIMIT" && r.type !== "CREDIT_LIMIT") continue;
     const pct = toNum(r.percentage);
     if (pct === undefined) continue;
     const resetIso = toResetIso(r.nextResetTime);

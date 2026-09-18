@@ -257,6 +257,36 @@ describe("quota helpers // C-Q1..C-Q3", () => {
     expect(q.weekly?.pct).toBe(17);
   });
 
+  it("parseGlmQuota: CREDIT_LIMIT (credit 资源包) 同构解析, TIME_LIMIT 仍跳过", () => {
+    // 形状取自实测 credit 型账号：epoch-ms 数字 nextResetTime
+    const creditOnly = parseGlmQuota({
+      data: {
+        limits: [
+          { type: "CREDIT_LIMIT", percentage: 1, nextResetTime: 1789743492588 },
+          {
+            type: "CREDIT_LIMIT",
+            percentage: 75,
+            nextResetTime: 1790067733980,
+          },
+        ],
+      },
+    });
+    expect(creditOnly.short?.pct).toBe(1);
+    expect(creditOnly.weekly?.pct).toBe(75);
+
+    const mixed = parseGlmQuota({
+      data: {
+        limits: [
+          { type: "CREDIT_LIMIT", percentage: 75, nextResetTime: 1790067733980 },
+          { type: "TIME_LIMIT", percentage: 80, nextResetTime: 1789786503998 },
+          { type: "TOKENS_LIMIT", percentage: 4, nextResetTime: 1789736689944 },
+        ],
+      },
+    });
+    expect(mixed.short?.pct).toBe(4);
+    expect(mixed.weekly?.pct).toBe(75);
+  });
+
   it("formatQuota: dual/short-only/relative units/expired", () => {
     const NOW = Date.parse("2026-08-30T12:00:00Z");
     const at = (m: number) => new Date(NOW + m * 60_000).toISOString();
