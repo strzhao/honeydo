@@ -151,7 +151,7 @@ export type PickerKeyAction =
   | { type: "noop" };
 
 /** One selectable row of the arrow-key picker: a cc-switch provider. */
-export type PickerEntry = { name: string; quota?: string };
+export type PickerEntry = { name: string; quota?: string; tag?: string };
 
 /** Result of the arrow-key picker (C-P1): a picked provider, or a skip. */
 export type PickerOutcome =
@@ -714,17 +714,85 @@ function formatReset(
 }
 
 /**
+ * Structured render input shared by the plain and the colored quota
+ * renderers: one percentage per window + the already-formatted relative
+ * reset (short window preferred). No windows at all → no reset either (the
+ * plain join then yields "").
+ */
+function quotaParts(
+  q: QuotaWindows,
+  nowMs: number,
+): { shortPct?: number; weeklyPct?: number; resetRel?: string } {
+  const shortPct = q.short?.pct;
+  const weeklyPct = q.weekly?.pct;
+  if (shortPct === undefined && weeklyPct === undefined) return {};
+  return {
+    shortPct,
+    weeklyPct,
+    resetRel: formatReset(q.short?.resetIso ?? q.weekly?.resetIso, nowMs),
+  };
+}
+
+/**
  * Format quota windows as the menu subtitle (C-Q3): `5h:P% wk:P% ↻<rel>`
  * (short reset preferred for the ↻ segment); missing windows degrade; a
  * missing/expired reset omits the ↻ segment entirely; no windows → "".
+ * Byte-exact contract with downstream consumers — the plain-text output is
+ * locked by unit tests; colors live in `colorQuota`, never here.
  */
 export function formatQuota(q: QuotaWindows, nowMs: number): string {
+  const p = quotaParts(q, nowMs);
   const parts: string[] = [];
-  if (q.short !== undefined) parts.push(`5h:${q.short.pct}%`);
-  if (q.weekly !== undefined) parts.push(`wk:${q.weekly.pct}%`);
+  if (p.shortPct !== undefined) parts.push(`5h:${p.shortPct}%`);
+  if (p.weeklyPct !== undefined) parts.push(`wk:${p.weeklyPct}%`);
   if (parts.length === 0) return "";
-  const rel = formatReset(q.short?.resetIso ?? q.weekly?.resetIso, nowMs);
-  return rel === undefined ? parts.join(" ") : `${parts.join(" ")} ↻${rel}`;
+  return p.resetRel === undefined
+    ? parts.join(" ")
+    : `${parts.join(" ")} ↻${p.resetRel}`;
+}
+
+// Limit 染色阈值（对齐 statusline-sage 的 GLM_HIGH/GLM_MID）。
+export const QUOTA_HIGH = 85;
+export const QUOTA_MID = 60;
+
+/** truecolor Sage 同款三色：#3A7D68 苔绿 / #D4920A 琥珀 / #D94F3D 朱红。 */
+const COLOR_SAGE = "\x1b[38;2;58;125;104m";
+const COLOR_AMBER = "\x1b[38;2;212;146;10m";
+const COLOR_VERMILION = "\x1b[38;2;217;79;61m";
+/** 关闭前景色回到终端默认，但不复位背景——选中行的整行高亮依赖这一点。 */
+const FG_OFF = "\x1b[39m";
+
+/**
+ * Limit 用量 → 段颜色：≥85 朱红、≥60 琥珀、其余（含非有限数）回退苔绿
+ * （阈值语义照搬 statusline-sage `_level_color`）。
+ */
+export function levelColor(pct: number): string {
+  if (!Number.isFinite(pct)) return COLOR_SAGE;
+  if (pct >= QUOTA_HIGH) return COLOR_VERMILION;
+  if (pct >= QUOTA_MID) return COLOR_AMBER;
+  return COLOR_SAGE;
+}
+
+/**
+ * `formatQuota` 的染色版（picker 用）：`5h:P%`/`wk:P%` 每个窗口段按各自 pct
+ * 独立选色；`↻<rel>` 段恒 dim，不参与染色。结构与降级规则和 `formatQuota`
+ * 一致（无窗口 → ""）。行内使用 `\x1b[39m`/`\x1b[22m` 收尾而非全复位，
+ * 以免抹掉选中行背景。
+ */
+export function colorQuota(q: QuotaWindows, nowMs: number): string {
+  const p = quotaParts(q, nowMs);
+  const parts: string[] = [];
+  if (p.shortPct !== undefined) {
+    parts.push(`${levelColor(p.shortPct)}5h:${p.shortPct}%${FG_OFF}`);
+  }
+  if (p.weeklyPct !== undefined) {
+    parts.push(`${levelColor(p.weeklyPct)}wk:${p.weeklyPct}%${FG_OFF}`);
+  }
+  if (parts.length === 0) return "";
+  const body = parts.join(" ");
+  return p.resetRel === undefined
+    ? body
+    : `${body} \x1b[2m↻${p.resetRel}\x1b[22m`;
 }
 
 export interface ClaudeOptions {
@@ -2387,17 +2455,122 @@ function readStdin(): Promise<string> {
 // Provider picker (TTY only) — arrow keys, zero deps
 // ---------------------------------------------------------------------------
 
+// Picker frame colors: 16-color structure + truecolor Sage accents (B2).
+const DIM_ON = "\x1b[2m";
+const INTENSITY_OFF = "\x1b[22m";
+const CYAN = "\x1b[36m";
+const BOLD_ON = "\x1b[1m";
+const RESET_ALL = "\x1b[0m";
+/** 选中行背景 #292e42（truecolor）。 */
+const SELECTED_BG = "\x1b[48;2;41;46;66m";
+
+const PICKER_TITLE_MAIN = "◆ gcli";
+const PICKER_TITLE_SUB = " · 选择 provider";
+const PICKER_HINT_KEYS = "↑↓/j/k 移动 · Enter 确认 · Esc 不切换";
+const PICKER_HINT_SKIP = "Esc 不切换";
+const PICKER_SEPARATOR = "─".repeat(50);
+const NO_QUOTA_MARK = "—";
+
+/**
+ * 给 picker 实际持有的 quota 文本（`formatQuota` 输出格式，byte-locked）上
+ * 色：`5h:P%`/`wk:P%` token 按各自 pct 染色，`↻rel` token 恒 dim。与
+ * `colorQuota` 同一视觉，只是入参是已格式化文本（DI 契约里 entries.quota
+ * 为 string，渲染层拿不到结构化窗口）。前提：pct 为整数——生产 parsers
+ * 均 Math.floor 保证；异形 token 优雅退化为不染色。
+ */
+function colorQuotaText(text: string): string {
+  return text
+    .split(" ")
+    .map((token) => {
+      const win = /^(5h|wk):(\d+)%$/.exec(token);
+      if (win !== null) {
+        return `${levelColor(Number(win[2]))}${token}${FG_OFF}`;
+      }
+      if (token.startsWith("↻")) return `${DIM_ON}${token}${INTENSITY_OFF}`;
+      return token;
+    })
+    .join(" ");
+}
+
+/**
+ * One entry row: `❯ `/two-space prefix | name column (max name width + 2,
+ * left-aligned) | colored quota (or dim — placeholder) | cyan `●<tag>`.
+ * Selected rows add the truecolor background + a bold name and end with a
+ * full reset; unselected rows keep the same structure without background.
+ */
+function pickerEntryRow(
+  entry: PickerEntry,
+  selected: boolean,
+  nameWidth: number,
+  noColor: boolean,
+): string {
+  const name = entry.name.padEnd(nameWidth);
+  const quotaText =
+    entry.quota !== undefined && entry.quota !== "" ? entry.quota : undefined;
+  const quota =
+    quotaText === undefined
+      ? noColor
+        ? NO_QUOTA_MARK
+        : `${DIM_ON}${NO_QUOTA_MARK}${INTENSITY_OFF}`
+      : noColor
+        ? quotaText
+        : colorQuotaText(quotaText);
+  const tag =
+    entry.tag !== undefined && entry.tag !== ""
+      ? noColor
+        ? ` ●${entry.tag}`
+        : ` ${CYAN}●${entry.tag}${FG_OFF}`
+      : "";
+  if (noColor) {
+    return `${selected ? "❯ " : "  "}${name}${quota}${tag}`;
+  }
+  return selected
+    ? `${SELECTED_BG}${COLOR_SAGE}❯${FG_OFF} ${BOLD_ON}${name}${INTENSITY_OFF}${quota}${tag}${RESET_ALL}`
+    : `  ${name}${quota}${tag}`;
+}
+
+/**
+ * The full picker frame as plain lines: 标题 2 行 + dim 分隔线 + 条目 N 行 +
+ * dim 末行提示 (`Esc 不切换`, non-selectable — skip 只经 Esc/C-g). Pure:
+ * no I/O; with `noColor` (NO_COLOR downgrade) zero ANSI escapes — 仅纯文本
+ * 排版，❯ 缩进 + 列对齐保留。Redraw cursor-up height = `entries.length + 4`.
+ */
+export function renderPickerRows(
+  entries: PickerEntry[],
+  selectedIndex: number,
+  noColor: boolean,
+): string[] {
+  const nameWidth = entries.reduce((w, e) => Math.max(w, e.name.length), 0) + 2;
+  const rows: string[] = [
+    noColor
+      ? `${PICKER_TITLE_MAIN}${PICKER_TITLE_SUB}`
+      : `${CYAN}${BOLD_ON}${PICKER_TITLE_MAIN}${RESET_ALL}${PICKER_TITLE_SUB}`,
+    noColor ? PICKER_HINT_KEYS : `${DIM_ON}${PICKER_HINT_KEYS}${INTENSITY_OFF}`,
+    noColor ? PICKER_SEPARATOR : `${DIM_ON}${PICKER_SEPARATOR}${INTENSITY_OFF}`,
+  ];
+  for (let i = 0; i < entries.length; i++) {
+    rows.push(
+      pickerEntryRow(entries[i], i === selectedIndex, nameWidth, noColor),
+    );
+  }
+  rows.push(
+    noColor ? PICKER_HINT_SKIP : `${DIM_ON}${PICKER_HINT_SKIP}${INTENSITY_OFF}`,
+  );
+  return rows;
+}
+
 /**
  * Production deps.pickProvider: arrow-key menu rendered entirely on stderr
  * (stdout stays pipe-clean). ↑↓/j/k move with wrap, Enter confirms, Esc
  * skips, ctrl-c restores the terminal then exits 130; any other key is a
- * noop (C-P1).
+ * noop (C-P1). Frame = 标题 2 行 + 分隔线 + 条目 N 行 + dim `Esc 不切换`
+ * 末行提示——旧的可选中「不切换」行已退化为提示（skip 走 Esc/C-g），移动
+ * 只覆盖条目行。
  *
  * Zero deps: `readline.emitKeypressEvents` + raw-mode stdin + hand-written
- * ANSI. Rows are redrawn in place (cursor-up + `\r` + clear-to-EOL per line)
- * so navigation leaves no ghosting (C-P3). The trailing 不切换 row is
- * appended here — `entries` holds providers only (D4); confirming it (or
- * pressing Esc) resolves {kind:"skip"}.
+ * ANSI (16-color structure + truecolor Sage Limit 染色; `NO_COLOR` 非空 →
+ * 全无色纯文本). Rows are redrawn in place (cursor-up + `\r` + clear-to-EOL
+ * per line) so navigation leaves no ghosting (C-P3).
  *
  * Raw-mode lifecycle: `process.stdin.isRaw` is saved before
  * `setRawMode(true)` and restored on EVERY exit path (confirm / Esc / ctrl-c
@@ -2406,45 +2579,33 @@ function readStdin(): Promise<string> {
  * spawned claude TUI takes stdin over cleanly. The picker always completes
  * before any backend spawn.
  */
-function pickProviderInteractive(
+export function pickProviderInteractive(
   entries: PickerEntry[],
   initialIndex: number,
 ): Promise<PickerOutcome> {
   return new Promise((resolvePromise) => {
     const stderr = process.stderr;
     const stdin = process.stdin;
-    const rowCount = entries.length + 1; // D1: count includes the 不切换 row
-    let index = Math.min(Math.max(Math.trunc(initialIndex), 0), rowCount - 1); // clamp (D4)
+    const noColor = (process.env.NO_COLOR ?? "") !== "";
+    const frameRows = entries.length + 4; // 标题2 + 分隔线1 + 条目N + 末行1
+    let index = Math.min(
+      Math.max(Math.trunc(initialIndex), 0),
+      Math.max(entries.length - 1, 0),
+    ); // clamp (D4)
     let settled = false;
 
-    const SKIP_LABEL = "不切换（使用 cc-switch 当前生效配置）";
-    const TITLE =
-      "gcli: 选择 cc-switch provider（↑↓/j/k/C-n/C-p 移动 · Enter 确认 · Esc/C-g 不切换）:";
-
-    const labelOf = (row: number): string => {
-      if (row >= entries.length) return SKIP_LABEL;
-      const entry = entries[row];
-      return entry.quota ? `${entry.name}  ${entry.quota}` : entry.name;
-    };
-    // Selected row: ❯ + full-line inverse video; unselected: two-space indent
-    // (C-P7). \x1b[K clears to EOL so a shorter previous render leaves no
-    // ghosting (残影).
-    const rowText = (row: number): string => {
-      const label = labelOf(row);
-      return row === index
-        ? `\x1b[7m❯ ${label}\x1b[27m\x1b[K`
-        : `  ${label}\x1b[K`;
-    };
-    const drawRows = (): void => {
-      for (let row = 0; row < rowCount; row++) {
-        stderr.write(`${rowText(row)}\n`);
+    // Full repaint: pure row construction + per-line clear-to-EOL so a
+    // shorter previous render leaves no ghosting (残影).
+    const drawFrame = (): void => {
+      for (const line of renderPickerRows(entries, index, noColor)) {
+        stderr.write(`${line}\x1b[K\n`);
       }
     };
     // In-place redraw: the cursor sits just below the last row after each
-    // draw, so move it back up over every entry row before repainting.
+    // draw, so move it back up over every frame line before repainting.
     const redraw = (): void => {
-      stderr.write(`\x1b[${rowCount}A\r`);
-      drawRows();
+      stderr.write(`\x1b[${frameRows}A\r`);
+      drawFrame();
     };
 
     // Raw-mode lifecycle (C-P3): save → raw → ... EVERY exit path restores.
@@ -2480,9 +2641,8 @@ function pickProviderInteractive(
       resolvePromise(outcome);
     };
 
-    // Title + hint drawn once; entry rows below it (C-P7).
-    stderr.write(`${TITLE}\n`);
-    drawRows();
+    // Title + hint drawn once; entry rows below it get repainted (C-P7).
+    drawFrame();
 
     emitKeypressEvents(stdin);
     onKeypress = (_str: string, key: KeypressKey | undefined): void => {
@@ -2493,12 +2653,14 @@ function pickProviderInteractive(
           process.exit(130);
         }
         if (key === undefined) return;
-        const action = applyPickerKey(key, index, rowCount);
+        // Movement covers entry rows only (the 末行提示 is not selectable).
+        const action = applyPickerKey(key, index, entries.length);
         if (action.type === "move") {
           index = action.index;
           redraw();
         } else if (action.type === "confirm") {
-          // The last row is the 不切换 row → skip (D4).
+          // index is always an entry row; the guard only matters for the
+          // empty-list edge (nothing selectable → skip).
           finish(
             index < entries.length
               ? { kind: "select", entry: entries[index] }
@@ -3277,13 +3439,17 @@ async function runClaudeBackend(
           }
           const quotaMap = await deps.fetchProviderQuotas(quotaItems);
           // D5/D6 (revise-3): rows are name + quota subtitle (host is gone);
-          // the remembered row gets a（上次）marker after the subtitle.
+          // the remembered row carries its ●上次 marker as a structured tag
+          // (rendering decides placement/color; quota text stays byte-clean).
           const entries: PickerEntry[] = ordered.map((p) => {
-            let quota = quotaMap.get(p.name);
+            const entry: PickerEntry = {
+              name: p.name,
+              quota: quotaMap.get(p.name),
+            };
             if (remembered !== undefined && p.name === remembered) {
-              quota = quota !== undefined ? `${quota}（上次）` : "（上次）";
+              entry.tag = "上次";
             }
-            return { name: p.name, quota };
+            return entry;
           });
           const picked = await deps.pickProvider(
             entries,

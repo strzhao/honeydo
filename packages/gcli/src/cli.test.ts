@@ -9,6 +9,7 @@ import {
   buildClaudeArgs,
   buildCronRepinPlan,
   buildQuotaRequest,
+  colorQuota,
   deriveHermesId,
   deriveKeyEnv,
   describeNoTextBody,
@@ -21,6 +22,7 @@ import {
   type HermesConfigEdit,
   type HermesProviderRegistry,
   type HermesStateFile,
+  levelColor,
   type ParseHermesResult,
   type ParseResult,
   parseApiArgs,
@@ -32,6 +34,9 @@ import {
   parseHermesStateFile,
   parseKimiUsages,
   parseSubcommand,
+  QUOTA_HIGH,
+  QUOTA_MID,
+  renderPickerRows,
   runApi,
   serializeHermesRegistry,
   serializeHermesStateFile,
@@ -306,6 +311,128 @@ describe("quota helpers // C-Q1..C-Q3", () => {
       "5h:1%",
     );
     expect(formatQuota({}, NOW)).toBe("");
+  });
+});
+
+// ----------------------------------------------------------------------------
+// picker 视觉 v3 — Limit 染色（truecolor Sage 同款）+ 帧渲染纯函数
+// ----------------------------------------------------------------------------
+
+describe("picker Limit 染色 // QUOTA_HIGH/QUOTA_MID/levelColor/colorQuota", () => {
+  const NOW = Date.parse("2026-08-30T12:00:00Z");
+  const at = (m: number) => new Date(NOW + m * 60_000).toISOString();
+  const SAGE = "\x1b[38;2;58;125;104m";
+  const AMBER = "\x1b[38;2;212;146;10m";
+  const VERMILION = "\x1b[38;2;217;79;61m";
+
+  it("阈值守恒（对齐 statusline-sage）+ 60/85 边界 + 非有限数回退苔绿", () => {
+    expect(QUOTA_HIGH).toBe(85);
+    expect(QUOTA_MID).toBe(60);
+    expect(levelColor(0)).toBe(SAGE);
+    expect(levelColor(59)).toBe(SAGE);
+    expect(levelColor(60)).toBe(AMBER);
+    expect(levelColor(84)).toBe(AMBER);
+    expect(levelColor(85)).toBe(VERMILION);
+    expect(levelColor(100)).toBe(VERMILION);
+    expect(levelColor(Number.NaN)).toBe(SAGE);
+    expect(levelColor(Number.POSITIVE_INFINITY)).toBe(SAGE);
+  });
+
+  it("colorQuota: 每窗口按各自 pct 独立判定，↻ 恒 dim，无窗口 → 空串", () => {
+    expect(colorQuota({ short: { pct: 91, resetIso: at(60) } }, NOW)).toContain(
+      VERMILION,
+    );
+    expect(colorQuota({ short: { pct: 75, resetIso: at(60) } }, NOW)).toContain(
+      AMBER,
+    );
+    expect(colorQuota({ short: { pct: 4, resetIso: at(60) } }, NOW)).toContain(
+      SAGE,
+    );
+    const mixed = colorQuota(
+      {
+        short: { pct: 4, resetIso: at(60) },
+        weekly: { pct: 75, resetIso: at(3000) },
+      },
+      NOW,
+    );
+    expect(mixed).toContain(`${SAGE}5h:4%\x1b[39m`);
+    expect(mixed).toContain(`${AMBER}wk:75%\x1b[39m`);
+    expect(mixed).toContain(" \x1b[2m↻1h\x1b[22m");
+    expect(colorQuota({}, NOW)).toBe("");
+  });
+});
+
+describe("picker 帧渲染 // renderPickerRows", () => {
+  const NOW = Date.parse("2026-08-30T12:00:00Z");
+  const at = (m: number) => new Date(NOW + m * 60_000).toISOString();
+  const ENTRIES = [
+    {
+      name: "GLM",
+      quota: formatQuota(
+        {
+          short: { pct: 4, resetIso: at(218) },
+          weekly: { pct: 23, resetIso: at(3000) },
+        },
+        NOW,
+      ),
+      tag: "上次",
+    },
+    { name: "Kimi For Coding" },
+  ];
+
+  it("帧结构 = 标题2 + 分隔线 + 条目 N + 末行提示（NO_COLOR 纯文本）", () => {
+    const rows = renderPickerRows(ENTRIES, 0, true);
+    expect(rows).toHaveLength(2 + 1 + ENTRIES.length + 1);
+    expect(rows[0]).toBe("◆ gcli · 选择 provider");
+    expect(rows[1]).toBe("↑↓/j/k 移动 · Enter 确认 · Esc 不切换");
+    expect(rows[2]).toBe("─".repeat(50));
+    expect(rows[rows.length - 1]).toBe("Esc 不切换");
+  });
+
+  it("NO_COLOR：全帧零 ANSI，❯ 缩进 + name 列对齐 + — 占位 + ●tag 保留", () => {
+    const rows = renderPickerRows(ENTRIES, 0, true);
+    for (const row of rows) expect(row.includes("\x1b")).toBe(false);
+    expect(rows[3].startsWith("❯ GLM")).toBe(true);
+    expect(rows[4].startsWith("  Kimi For Coding")).toBe(true);
+    // name 列宽 = max(name 长度)+2：两行的 quota/占位符起点一致
+    expect(rows[3].indexOf("5h:4%")).toBe(rows[4].indexOf("—"));
+    expect(rows[3]).toContain(" ●上次");
+  });
+
+  it("彩色：选中行 truecolor 背景 + sage ❯ + 窗口染色 + cyan ●tag，行尾全复位", () => {
+    const rows = renderPickerRows(ENTRIES, 0, false);
+    expect(rows[3]).toContain("\x1b[48;2;41;46;66m");
+    expect(rows[3]).toContain("\x1b[38;2;58;125;104m❯\x1b[39m");
+    expect(rows[3]).toContain("\x1b[38;2;58;125;104m5h:4%\x1b[39m");
+    expect(rows[3]).toContain("\x1b[36m●上次\x1b[39m");
+    expect(rows[3].endsWith("\x1b[0m")).toBe(true);
+  });
+
+  it("彩色：未选中行无背景；hermes 无 quota 无 tag 条目自然退化为 dim —", () => {
+    const rows = renderPickerRows(ENTRIES, 0, false);
+    expect(rows[4]).not.toContain("\x1b[48;2");
+    expect(rows[4]).not.toContain("\x1b[38;2");
+    expect(rows[4]).toContain("\x1b[2m—\x1b[22m");
+    const hermes = renderPickerRows(
+      [{ name: "kimi" }, { name: "glm" }],
+      0,
+      false,
+    );
+    expect(hermes).toHaveLength(6);
+    expect(hermes[3]).toContain("\x1b[2m—\x1b[22m"); // 选中行无 quota 同样 dim —
+    expect(hermes[4]).not.toContain("\x1b[48;2");
+    expect(hermes[4]).toContain("  glm  ");
+    expect(hermes[4]).toContain("\x1b[2m—\x1b[22m");
+  });
+
+  it("彩色：标题 cyan+bold、键位/分隔线/末行 dim", () => {
+    const rows = renderPickerRows(ENTRIES, 0, false);
+    expect(rows[0]).toBe("\x1b[36m\x1b[1m◆ gcli\x1b[0m · 选择 provider");
+    expect(rows[1]).toBe(
+      "\x1b[2m↑↓/j/k 移动 · Enter 确认 · Esc 不切换\x1b[22m",
+    );
+    expect(rows[2]).toBe(`\x1b[2m${"─".repeat(50)}\x1b[22m`);
+    expect(rows[rows.length - 1]).toBe("\x1b[2mEsc 不切换\x1b[22m");
   });
 });
 
