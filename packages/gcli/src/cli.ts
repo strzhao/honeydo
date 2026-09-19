@@ -1971,16 +1971,24 @@ export function runClaude(
  * Unlike runAgy/runClaude: no timeout, no stdout/stderr capture —
  * the child owns the terminal. The child's exit code is passed
  * through unchanged (SIGINT→130, SIGTERM→143 per shell convention).
+ *
+ * An inherited CLAUDE_CODE_CHILD_SESSION=1 is stripped: claude reads it as
+ * "spawned sub-worker" and silently turns transcript saving off, so the
+ * session never shows up in `claude --resume`. An attended TUI is a
+ * top-level session, never a sub-worker. agy never reads the var, so the
+ * strip is a no-op there; print mode keeps the env verbatim.
  */
-function spawnInteractive(
+export function spawnInteractive(
   bin: string,
   args: string[],
   cwd?: string,
 ): Promise<InteractiveSpawnResult> {
+  const env = { ...process.env };
+  delete env.CLAUDE_CODE_CHILD_SESSION;
   return new Promise((resolveFn) => {
     const child = spawn(bin, args, {
       cwd,
-      env: { ...process.env },
+      env,
       stdio: "inherit",
     });
 
