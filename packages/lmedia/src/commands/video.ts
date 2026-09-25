@@ -27,6 +27,8 @@ const FAST_SHIFT_VIDEO = 6.0;
 interface GenOpts {
   out?: string;
   res?: string;
+  width?: string;
+  height?: string;
   seconds?: string;
   steps?: string;
   seed?: string;
@@ -183,6 +185,8 @@ function registerGen(video: Command): void {
     .description('文生视频/首帧图生视频：MiniMax-H3 本地（默认 480p / 5s / 12 步，mp4 含立体声音轨；生产配方见 lmedia video recipes）')
     .option('-o, --out <path>', '输出 mp4 路径', `lmedia-video-${Date.now()}.mp4`)
     .option('-r, --res <preset>', `分辨率档：${RES_PRESETS.join('|')}（lmedia video list-res 看实际画布）`, '480p')
+    .option('--width <px>', '画布宽（逐轴覆盖 --res 的档位值；必须 32 的倍数，引擎 generate.py 逐轴硬约束）')
+    .option('--height <px>', '画布高（逐轴覆盖 --res 的档位值；必须 32 的倍数，引擎 generate.py 逐轴硬约束）')
     .option('--seconds <s>', '片段时长秒（1-15）', '5')
     .option('--steps <n>', `去噪步数（基座 12 步≈20 步；--fast 默认取 bundle meta 的推荐步数，缺失按 ${FAST_STEPS}，4-8 为蒸馏有效区间）`)
     .option('--seed <n>', '随机种子', '42')
@@ -224,6 +228,19 @@ function registerGen(video: Command): void {
       if (!Number.isInteger(seed)) {
         console.error(`--seed 需为整数（当前 ${opts.seed}）`);
         process.exit(2);
+      }
+      // --width/--height 逐轴覆盖 --res（mmh3turbo generate.py:71-72 逐轴硬约束：必须 32 的整数倍）
+      const axes: [string, string | undefined][] = [
+        ['--width', opts.width],
+        ['--height', opts.height],
+      ];
+      for (const [label, raw] of axes) {
+        if (raw === undefined) continue;
+        const px = parseInt(raw, 10);
+        if (!Number.isInteger(px) || px <= 0 || px % 32 !== 0) {
+          console.error(`${label} 需为 32 的整数倍（当前 ${raw}；引擎逐轴覆盖 --res 的硬约束，例: 736=23×32、1600=50×32）`);
+          process.exit(2);
+        }
       }
       for (const [label, p] of [['首帧图', opts.firstFrame], ['尾帧图', opts.lastFrame]] as const) {
         if (p && !fs.existsSync(p)) {
@@ -273,6 +290,9 @@ function registerGen(video: Command): void {
         '--seed', String(seed),
         '-o', runDir,
       ];
+      // --width/--height 逐轴覆盖档位画布（放在 -r 之后、--first-frame 之前；未给的轴退回档位）
+      if (opts.width) args.push('--width', String(parseInt(opts.width, 10)));
+      if (opts.height) args.push('--height', String(parseInt(opts.height, 10)));
       if (opts.firstFrame) args.push('--first-frame', path.resolve(opts.firstFrame));
       if (opts.lastFrame) args.push('--last-frame', path.resolve(opts.lastFrame));
       let engineCmd = rt.mmh3turbo;

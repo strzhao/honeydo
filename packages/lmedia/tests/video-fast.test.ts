@@ -63,6 +63,28 @@ describe('video gen 参数校验（退出码 2，无环境依赖）', () => {
     expect(r.status).toBe(2);
     expect(r.stderr).toContain('尾帧图不存在');
   });
+
+  it('--width 非 32 倍数 → 2（mmh3turbo generate.py 逐轴覆盖 --res 的硬约束）', () => {
+    const r = run(['gen', '测试', '--width', '700']);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('--width');
+    expect(r.stderr).toContain('32');
+  });
+
+  it('--height 非 32 倍数 → 2', () => {
+    const r = run(['gen', '测试', '--height', '1601']);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('--height');
+    expect(r.stderr).toContain('32');
+  });
+
+  it('--width 736 --height 1600 合法 → 走到环境校验（LMEDIA_RUNTIME 指空目录确定性 exit 1）', () => {
+    // 校验通过（未 exit 2）→ 落到 venv 存在性检查 exit 1，证明 736/1600（23×32 / 50×32）被接受
+    const rt = fs.mkdtempSync(path.join(os.tmpdir(), 'lmedia-rt-w-'));
+    const r = run(['gen', '测试', '--width', '736', '--height', '1600'], { LMEDIA_RUNTIME: rt });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain('mmh3turbo 未安装');
+  });
 });
 
 describe('video --fast / turbo-merge 环境分域（退出码 1）', () => {
