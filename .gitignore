@@ -3,3 +3,7 @@ dist/
 *.tsbuildinfo
 .DS_Store
 generated_images/
+
+# autopilot：仅 knowledge/ 与 project/ 入库（团队共享的决策与计划），
+# runtime/ 是本地产物（含 session id、时间戳、状态机中间态），不入库。
+.autopilot/runtime/

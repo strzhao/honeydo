@@ -33,6 +33,7 @@ import {
   parseHermesRegistry,
   parseHermesStateFile,
   parseKimiUsages,
+  parseSessionAttribution,
   parseSubcommand,
   pickProviderInteractive,
   QUOTA_HIGH,
@@ -399,9 +400,9 @@ describe("picker 帧渲染 // renderPickerRows", () => {
     const rows = renderPickerRows(ENTRIES, 0, true);
     expect(rows).toHaveLength(2 + 1 + ENTRIES.length + 1);
     expect(rows[0]).toBe("◆ gcli · 选择 provider");
-    expect(rows[1]).toBe("↑↓/j/k 移动 · Enter 确认 · Esc 退出");
+    expect(rows[1]).toBe("↑↓/j/k 移动 · Enter 确认 · Esc 不切换");
     expect(rows[2]).toBe("─".repeat(50));
-    expect(rows[rows.length - 1]).toBe("Esc 退出");
+    expect(rows[rows.length - 1]).toBe("Esc 不切换");
   });
 
   it("NO_COLOR：全帧零 ANSI，❯ 缩进 + name 列对齐 + — 占位 + ●tag 保留", () => {
@@ -443,9 +444,214 @@ describe("picker 帧渲染 // renderPickerRows", () => {
   it("彩色：标题 cyan+bold、键位/分隔线/末行 dim", () => {
     const rows = renderPickerRows(ENTRIES, 0, false);
     expect(rows[0]).toBe("\x1b[36m\x1b[1m◆ gcli\x1b[0m · 选择 provider");
-    expect(rows[1]).toBe("\x1b[2m↑↓/j/k 移动 · Enter 确认 · Esc 退出\x1b[22m");
+    expect(rows[1]).toBe(
+      "\x1b[2m↑↓/j/k 移动 · Enter 确认 · Esc 不切换\x1b[22m",
+    );
     expect(rows[2]).toBe(`\x1b[2m${"─".repeat(50)}\x1b[22m`);
-    expect(rows[rows.length - 1]).toBe("\x1b[2mEsc 退出\x1b[22m");
+    expect(rows[rows.length - 1]).toBe("\x1b[2mEsc 不切换\x1b[22m");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 会话归属 // parseSessionAttribution（ps 行 × provider env 纯解析）
+// ---------------------------------------------------------------------------
+
+describe("parseSessionAttribution", () => {
+  // P1 fixture 镜像验收谓词：providerA(URL=u,token=ta) 3 行、providerB(URL=u,
+  // token=tb) 2 行（同域异 token）、裸行 5 行、--settings 未知 token 1 行。
+  const PROVIDERS = [
+    { name: "A", baseUrl: "u", authToken: "ta" },
+    { name: "B", baseUrl: "u", authToken: "tb" },
+  ];
+  const settingsLine = (token: string): string =>
+    `claude -p task --settings {"env":{"ANTHROPIC_BASE_URL":"u","ANTHROPIC_AUTH_TOKEN":"${token}"}} --model x`;
+
+  it("P1：同域异 token 区分归属 + 裸行/未知 token 计 unattributed，深相等", () => {
+    const lines = [
+      settingsLine("ta"),
+      `claude --settings { "env": { "ANTHROPIC_BASE_URL": "u", "ANTHROPIC_AUTH_TOKEN": "ta" } }`, // JSON 含空格
+      settingsLine("ta"),
+      settingsLine("tb"),
+      settingsLine("tb"),
+      "claude -p hello", // 裸行 ×5
+      "claude",
+      "claude --resume abc",
+      "claude -p 世界",
+      "claude --dangerously-skip-permissions",
+      settingsLine("unknown-token"), // --settings 匹配不到任何 provider
+    ];
+    const r = parseSessionAttribution(lines, PROVIDERS);
+    expect(r).toEqual({ counts: { A: 3, B: 2 }, unattributed: 6 });
+  });
+
+  it("--settings <file>（无 JSON）/ 坏 JSON / 括号不配平 → 全部 unattributed 且不 throw", () => {
+    const lines = [
+      "claude --settings /tmp/settings.json -p hi",
+      'claude --settings {"env":broken -p hi',
+      'claude --settings {"env":{"ANTHROPIC_BASE_URL":"u"', // 括号不配平
+      "claude --settings no-brace-here",
+      "claude -p x",
+    ];
+    const r = parseSessionAttribution(lines, PROVIDERS);
+    expect(r).toEqual({ counts: {}, unattributed: 5 });
+  });
+
+  it("嵌套 {} 不干扰配平：settings 顶层多字段正确取 env", () => {
+    const lines = [
+      'claude --settings {"env":{"ANTHROPIC_BASE_URL":"u2","ANTHROPIC_AUTH_TOKEN":"tk"},"permissions":{"allow":{"Bash":1}}} extra',
+    ];
+    const r = parseSessionAttribution(lines, [
+      { name: "C", baseUrl: "u2", authToken: "tk" },
+    ]);
+    expect(r).toEqual({ counts: { C: 1 }, unattributed: 0 });
+  });
+
+  it("apiKey 参与匹配：无 AUTH_TOKEN 的行经 ANTHROPIC_API_KEY 归属", () => {
+    const lines = [
+      'claude --settings {"env":{"ANTHROPIC_BASE_URL":"u3","ANTHROPIC_API_KEY":"sk-d"}}',
+    ];
+    const r = parseSessionAttribution(lines, [
+      { name: "D", baseUrl: "u3", apiKey: "sk-d" },
+    ]);
+    expect(r).toEqual({ counts: { D: 1 }, unattributed: 0 });
+  });
+
+  it("同 URL+token 的多个 provider 条目各自计同数（边缘，接受）", () => {
+    const lines = [
+      'claude --settings {"env":{"ANTHROPIC_BASE_URL":"u4","ANTHROPIC_AUTH_TOKEN":"te"}}',
+      'claude --settings {"env":{"ANTHROPIC_BASE_URL":"u4","ANTHROPIC_AUTH_TOKEN":"te"}}',
+    ];
+    const r = parseSessionAttribution(lines, [
+      { name: "E", baseUrl: "u4", authToken: "te" },
+      { name: "F", baseUrl: "u4", authToken: "te" },
+    ]);
+    expect(r).toEqual({ counts: { E: 2, F: 2 }, unattributed: 0 });
+  });
+
+  it("空 token 不参与匹配：settings 无 token 的行不归属到任何 provider", () => {
+    const lines = ['claude --settings {"env":{"ANTHROPIC_BASE_URL":"u"}}'];
+    const r = parseSessionAttribution(lines, [
+      { name: "G", baseUrl: "u" }, // provider 自身也无 token
+      { name: "H", baseUrl: "u", authToken: "th" },
+    ]);
+    expect(r).toEqual({ counts: {}, unattributed: 1 });
+  });
+
+  it("URL 不全等不归属（防跨域并账）；env 缺失/异形不 throw", () => {
+    const lines = [
+      'claude --settings {"env":{"ANTHROPIC_BASE_URL":"other","ANTHROPIC_AUTH_TOKEN":"ta"}}',
+      'claude --settings {"model":"x"}', // env 缺失
+      'claude --settings {"env":"not-an-object"}', // env 异形
+      "claude --settings [1,2,3]", // 根非对象
+      "claude --settings 5", // 无 { → 无 JSON
+    ];
+    const r = parseSessionAttribution(lines, PROVIDERS);
+    expect(r).toEqual({ counts: {}, unattributed: 5 });
+  });
+
+  it("空输入 → 空结果", () => {
+    expect(parseSessionAttribution([], PROVIDERS)).toEqual({
+      counts: {},
+      unattributed: 0,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// picker 会话固定列 + 裸会话末行提示 // renderPickerRows 扩展
+// ---------------------------------------------------------------------------
+
+describe("picker 会话列 // renderPickerRows sessions 段", () => {
+  const ENTRIES = [
+    { name: "GLM", quota: "5h:4% wk:23%", sessions: 3 },
+    { name: "Kimi", sessions: 0 }, // 无 quota 条目也显示 0会话
+    { name: "Zeta" }, // 无 sessions（hermes / 扫描退化）
+  ];
+  // nameWidth = max(3,4,4)+2 = 6；quotaWidth = max(12, 1) = 12
+  // 会话段起始列 = 2(前缀) + 6 + 12 = 20，"会话" 再 +2（` <n>` 两字符）
+
+  it("NO_COLOR：有 sessions 行含 ` <n>会话`、跨行起始列对齐；无 sessions 行零「会话」", () => {
+    const rows = renderPickerRows(ENTRIES, 0, true);
+    expect(rows[3]).toContain(" 3会话");
+    expect(rows[4]).toContain(" 0会话");
+    expect(rows[5].includes("会话")).toBe(false);
+    expect(rows[3].indexOf("会话")).toBe(rows[4].indexOf("会话"));
+    expect(rows[3].indexOf("会话")).toBe(2 + 6 + 12 + 2);
+  });
+
+  it("彩色：会话段恒 dim（\\x1b[2m 包裹 + 单项关闭码），quota 列 pad 不破坏占位符染色", () => {
+    const rows = renderPickerRows(ENTRIES, 0, false);
+    expect(rows[3]).toContain("\x1b[2m 3会话\x1b[22m");
+    expect(rows[4]).toContain("\x1b[2m 0会话\x1b[22m");
+    // 选中行行尾仍全复位
+    expect(rows[3].endsWith("\x1b[0m")).toBe(true);
+    // dim — 占位符仍连续（pad 在染色段之外，不插入染色段内部）
+    expect(rows[4]).toContain("\x1b[2m—\x1b[22m");
+    // quota 段 pad 到最大可见长度，会话列跨行对齐（含 ANSI 时按可见列断言）
+    const plain = (s: string): string =>
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: 断言剥离 ANSI，控制字符为被测对象
+      s.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(plain(rows[3]).indexOf("会话")).toBe(plain(rows[4]).indexOf("会话"));
+  });
+
+  it("token 防泄漏：渲染输出永不含 fixture token 子串（P4）", () => {
+    const TOKENS = ["sk-secret-gcli-token-xyz", "ta-long-fixture-token"];
+    const rows = renderPickerRows(
+      [
+        { name: "A", quota: "5h:4%", sessions: 3 },
+        { name: "B", sessions: 0 },
+      ],
+      0,
+      false,
+      7,
+    );
+    for (const row of rows) {
+      for (const token of TOKENS) {
+        expect(row).not.toContain(token);
+      }
+    }
+  });
+});
+
+describe("picker 裸会话末行提示 // renderPickerRows 第 4 参", () => {
+  const ENTRIES = [{ name: "GLM", sessions: 1 }, { name: "Kimi" }];
+
+  it("P3：unattributedCount=5 → 末行含「另有 5 个裸 claude 会话未归属」且含「Esc 不切换」，rowCount 不变", () => {
+    const rows = renderPickerRows(ENTRIES, 0, true, 5);
+    expect(rows).toHaveLength(ENTRIES.length + 4);
+    const last = rows[rows.length - 1];
+    expect(last).toContain("另有 5 个裸 claude 会话未归属");
+    expect(last).toContain("Esc 不切换");
+  });
+
+  it("=0 与缺省（三参向后兼容）→ 末行仅「Esc 不切换」", () => {
+    for (const rows of [
+      renderPickerRows(ENTRIES, 0, true, 0),
+      renderPickerRows(ENTRIES, 0, true),
+    ]) {
+      expect(rows).toHaveLength(ENTRIES.length + 4);
+      expect(rows[rows.length - 1]).toBe("Esc 不切换");
+    }
+  });
+
+  it("彩色：>0 末行整体 dim；NO_COLOR 零 ANSI 排版保留", () => {
+    expect(renderPickerRows(ENTRIES, 0, false, 5).at(-1)).toBe(
+      `\x1b[2m另有 5 个裸 claude 会话未归属 · Esc 不切换\x1b[22m`,
+    );
+    const plain = renderPickerRows(ENTRIES, 0, true, 5);
+    for (const row of plain) expect(row.includes("\x1b")).toBe(false);
+    expect(plain.at(-1)).toContain("另有 5 个裸 claude 会话未归属");
+  });
+
+  it("扫描退化（全部无 sessions）+ unattributed=0 → 渲染同现状帧（仅文案更新）", () => {
+    const rows = renderPickerRows(
+      [{ name: "kimi" }, { name: "glm" }],
+      0,
+      false,
+    );
+    expect(rows).toHaveLength(6);
+    expect(rows.some((r) => r.includes("会话"))).toBe(false);
+    expect(rows.at(-1)).toBe("\x1b[2mEsc 不切换\x1b[22m");
   });
 });
 
@@ -561,6 +767,60 @@ describe("pickProviderInteractive 孤立 ESC 快速路径", () => {
     process.stdin.emit("keypress", "", { name: "return" });
     await p;
   }, 5000);
+});
+
+// ---------------------------------------------------------------------------
+// unattributed 双通道（位置第三参 + entries 兜底）——红队集成发现的真 bug 回归锁：
+// 两参 pickProvider 包装（仓内规范 mock 模板）会丢弃位置第三参，缺口提示必须
+// 能从 entries 自身恢复。
+// ---------------------------------------------------------------------------
+
+describe("pickProviderInteractive unattributed 双通道", () => {
+  function captureFrame(): { text: () => string; restore: () => void } {
+    const chunks: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation(((
+      chunk: unknown,
+    ) => {
+      chunks.push(typeof chunk === "string" ? chunk : String(chunk));
+      return true;
+    }) as typeof process.stderr.write);
+    return {
+      text: () => chunks.join(""),
+      restore: () => spy.mockRestore(),
+    };
+  }
+
+  it("两参调用 + entries 携带 unattributed=5 → 帧含「另有 5 个…」（兜底通道）", async () => {
+    const cap = captureFrame();
+    const p = pickProviderInteractive(
+      [{ name: "A", sessions: 1, unattributed: 5 }],
+      0,
+    );
+    process.stdin.emit("keypress", "", { name: "escape" });
+    await p;
+    cap.restore();
+    expect(cap.text()).toContain("另有 5 个裸 claude 会话未归属");
+  });
+
+  it("位置第三参优先于 entries 兜底：entries=5 + 第三参=2 → 帧显示 2", async () => {
+    const cap = captureFrame();
+    const p = pickProviderInteractive([{ name: "A", unattributed: 5 }], 0, 2);
+    process.stdin.emit("keypress", "", { name: "escape" });
+    await p;
+    cap.restore();
+    expect(cap.text()).toContain("另有 2 个裸 claude 会话未归属");
+    expect(cap.text()).not.toContain("另有 5 个");
+  });
+
+  it("两参调用 + entries 无 unattributed → 纯 Esc 末行（现状不回归）", async () => {
+    const cap = captureFrame();
+    const p = pickProviderInteractive([{ name: "A" }], 0);
+    process.stdin.emit("keypress", "", { name: "escape" });
+    await p;
+    cap.restore();
+    expect(cap.text()).toContain("Esc 不切换");
+    expect(cap.text().includes("未归属")).toBe(false);
+  });
 });
 
 describe("applyPickerKey", () => {
@@ -1455,7 +1715,7 @@ describe("HERMES_PROVIDER_SEEDS", () => {
   it("contains the built-in seeds", () => {
     // "kimi" 是 cc-switch 真实条目名（09-06 实机冒烟实证）；
     // "Kimi For Coding" 保留作别名防御
-    expect(HERMES_PROVIDER_SEEDS["kimi"]).toEqual({
+    expect(HERMES_PROVIDER_SEEDS.kimi).toEqual({
       id: "kimi-coding",
       keyEnv: "KIMI_CODING_API_KEY",
     });
@@ -1686,7 +1946,7 @@ describe("runApi retries and diagnostics", () => {
   });
 
   it("non-stream long text (>50k chars): returned in full, NOT truncated", async () => {
-    const long = "a".repeat(55_000) + "TAIL-MARKER";
+    const long = `${"a".repeat(55_000)}TAIL-MARKER`;
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>

@@ -184,7 +184,7 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("首绘 B 骨架 // 视觉规格 1", () => {
-  it("标题两行 + `─`×50 分隔线 + 3 条目 + 末行 `Esc 退出`，恰 7 行；旧文案消失", async () => {
+  it("标题两行 + `─`×50 分隔线 + 3 条目 + 末行 `Esc 不切换`，恰 7 行；旧文案消失", async () => {
     vi.stubEnv("NO_COLOR", ""); // 对照组：强制非 NO_COLOR（空串 ≠ 非空）
     const cap = makeCapture();
     const deps = makeDeps({ keys: [{ name: "escape" }] });
@@ -198,13 +198,13 @@ describe("首绘 B 骨架 // 视觉规格 1", () => {
     expect(text).toContain(CYAN);
     expect(text).toContain(BOLD);
     // 标题行 2（dim）
-    expect(text).toContain("↑↓/j/k 移动 · Enter 确认 · Esc 退出");
+    expect(text).toContain("↑↓/j/k 移动 · Enter 确认 · Esc 不切换");
     expect(text).toContain(DIM);
     // 结构恰 7 行：标题2 + 分隔线1 + 条目3 + 末行1
     const lines = cap.lines();
     expect(lines).toHaveLength(7);
     expect(lines.filter((l) => l === "─".repeat(50))).toHaveLength(1);
-    expect(lines[lines.length - 1]).toBe("Esc 退出");
+    expect(lines[lines.length - 1]).toBe("Esc 不切换");
     for (const name of NAMES) {
       expect(lines.some((l) => l.includes(name))).toBe(true);
     }

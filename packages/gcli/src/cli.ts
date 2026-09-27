@@ -150,8 +150,27 @@ export type PickerKeyAction =
   | { type: "skip" }
   | { type: "noop" };
 
-/** One selectable row of the arrow-key picker: a cc-switch provider. */
-export type PickerEntry = { name: string; quota?: string; tag?: string };
+/**
+ * One selectable row of the arrow-key picker: a cc-switch provider.
+ * `sessions` = attributable live claude sessions for this provider (0 included);
+ * absent when the scan is unavailable (degraded — no session column, like an
+ * absent quota).
+ *
+ * `unattributed` is frame-level, not per-entry: the bare-claude process count
+ * attached (same value) to every entry by the claude menu path so ANY
+ * deps.pickProvider implementation still renders the footer hint — including
+ * two-arg wrappers that forward only `(entries, initialIndex)` to the
+ * production picker and would otherwise drop the positional third argument.
+ * Consumers must resolve it via `pickProviderInteractive` (positional arg
+ * wins, entries-borne value is the fallback), never read it per entry.
+ */
+export type PickerEntry = {
+  name: string;
+  quota?: string;
+  tag?: string;
+  sessions?: number;
+  unattributed?: number;
+};
 
 /** Result of the arrow-key picker (C-P1): a picked provider, or a skip. */
 export type PickerOutcome =
@@ -278,7 +297,7 @@ export type RunDeps = {
   isInteractive: () => boolean;
   /**
    * TTY-only arrow-key provider picker (C-P1/C-P3): present the cc-switch
-   * provider entries (the production impl renders a dim Esc 退出 footer;
+   * provider entries (the production impl renders a dim Esc 不切换 footer;
    * row — `entries` holds providers only) and resolve the confirmed entry,
    * or {kind:"skip"} on Esc/C-g (= 退出，不启动后端). `initialIndex` is the caller-
    * computed row to highlight (memory hit or 0); implementations clamp it.
@@ -289,6 +308,14 @@ export type RunDeps = {
   pickProvider: (
     entries: PickerEntry[],
     initialIndex: number,
+    /**
+     * Count of live bare-claude processes (no --settings) shown as a dim
+     * footer hint on the menu. 0 / omitted → plain Esc footer. Only forwarded
+     * by the claude TTY menu path. Redundantly carried on the entries
+     * themselves (`PickerEntry.unattributed`), so implementations that drop
+     * this positional argument still render the hint.
+     */
+    unattributedCount?: number,
   ) => Promise<PickerOutcome>;
   /**
    * Quota subtitles (revise-3, C-Q4): given every menu provider's {name, env},
@@ -302,6 +329,17 @@ export type RunDeps = {
       env: Record<string, string>;
     }[],
   ) => Promise<Map<string, string>>;
+  /**
+   * One joined-argv line per live claude process (`ps -ww -o command=`), for
+   * TTY-picker session attribution (revise: picker 会话列). Default impl is a
+   * read-only `pgrep -x claude` + `ps -ww` pair. `pgrep` exit 1 (no match)
+   * resolves to []; pgrep exit >1 / ps failure / spawn error REJECTS — the
+   * caller degrades to no session column. Optional: when absent the scan
+   * capability is missing and the picker renders without session counts.
+   * Only ever invoked on the claude TTY menu path — never non-TTY, never
+   * `--provider`, never silent reuse (zero spawn discipline preserved).
+   */
+  listClaudeProcessArgs?: () => Promise<string[]>;
   /**
    * Read the remembered provider name (D2): trimmed first line of
    * LAST_PROVIDER_PATH, or undefined when missing/empty/unreadable. Only
@@ -2498,8 +2536,8 @@ const SELECTED_BG = "\x1b[48;2;41;46;66m";
 
 const PICKER_TITLE_MAIN = "◆ gcli";
 const PICKER_TITLE_SUB = " · 选择 provider";
-const PICKER_HINT_KEYS = "↑↓/j/k 移动 · Enter 确认 · Esc 退出";
-const PICKER_HINT_SKIP = "Esc 退出";
+const PICKER_HINT_KEYS = "↑↓/j/k 移动 · Enter 确认 · Esc 不切换";
+const PICKER_HINT_SKIP = "Esc 不切换";
 const PICKER_SEPARATOR = "─".repeat(50);
 const NO_QUOTA_MARK = "—";
 
@@ -2526,19 +2564,27 @@ function colorQuotaText(text: string): string {
 
 /**
  * One entry row: `❯ `/two-space prefix | name column (max name width + 2,
- * left-aligned) | colored quota (or dim — placeholder) | cyan `●<tag>`.
- * Selected rows add the truecolor background + a bold name and end with a
- * full reset; unselected rows keep the same structure without background.
+ * left-aligned) | colored quota (or dim — placeholder) padded to the widest
+ * quota across entries | dim ` <n>会话` (only when entry.sessions is set) |
+ * cyan `●<tag>`. The quota pad (by JS `.length`) keeps the session column
+ * start aligned across rows; padding sits outside the colored segments so
+ * the dim placeholder stays contiguous. Selected rows add the truecolor
+ * background + a bold name and end with a full reset; unselected rows keep
+ * the same structure without background.
  */
 function pickerEntryRow(
   entry: PickerEntry,
   selected: boolean,
   nameWidth: number,
+  quotaWidth: number,
   noColor: boolean,
 ): string {
   const name = entry.name.padEnd(nameWidth);
   const quotaText =
     entry.quota !== undefined && entry.quota !== "" ? entry.quota : undefined;
+  const pad = " ".repeat(
+    Math.max(0, quotaWidth - (quotaText ?? NO_QUOTA_MARK).length),
+  );
   const quota =
     quotaText === undefined
       ? noColor
@@ -2547,6 +2593,13 @@ function pickerEntryRow(
       : noColor
         ? quotaText
         : colorQuotaText(quotaText);
+  const quotaColumn = `${quota}${pad}`;
+  const sessions =
+    entry.sessions === undefined
+      ? ""
+      : noColor
+        ? ` ${entry.sessions}会话`
+        : `${DIM_ON} ${entry.sessions}会话${INTENSITY_OFF}`;
   const tag =
     entry.tag !== undefined && entry.tag !== ""
       ? noColor
@@ -2554,25 +2607,39 @@ function pickerEntryRow(
         : ` ${CYAN}●${entry.tag}${FG_OFF}`
       : "";
   if (noColor) {
-    return `${selected ? "❯ " : "  "}${name}${quota}${tag}`;
+    return `${selected ? "❯ " : "  "}${name}${quotaColumn}${sessions}${tag}`;
   }
   return selected
-    ? `${SELECTED_BG}${COLOR_SAGE}❯${FG_OFF} ${BOLD_ON}${name}${INTENSITY_OFF}${quota}${tag}${RESET_ALL}`
-    : `  ${name}${quota}${tag}`;
+    ? `${SELECTED_BG}${COLOR_SAGE}❯${FG_OFF} ${BOLD_ON}${name}${INTENSITY_OFF}${quotaColumn}${sessions}${tag}${RESET_ALL}`
+    : `  ${name}${quotaColumn}${sessions}${tag}`;
 }
 
 /**
  * The full picker frame as plain lines: 标题 2 行 + dim 分隔线 + 条目 N 行 +
- * dim 末行提示 (`Esc 退出`, non-selectable — skip 只经 Esc/C-g（skip = 退出不启动）). Pure:
- * no I/O; with `noColor` (NO_COLOR downgrade) zero ANSI escapes — 仅纯文本
- * 排版，❯ 缩进 + 列对齐保留。Redraw cursor-up height = `entries.length + 4`.
+ * dim 末行提示 (non-selectable — skip 只经 Esc/C-g). With `unattributedCount >
+ * 0` the footer reads `另有 N 个裸 claude 会话未归属 · Esc 不切换` (bare claude
+ * processes carry no --settings and cannot be attributed to a provider);
+ * otherwise it is plain `Esc 不切换`. Pure: no I/O; with `noColor` (NO_COLOR
+ * downgrade) zero ANSI escapes — 仅纯文本排版，❯ 缩进 + 列对齐保留。Redraw
+ * cursor-up height = `entries.length + 4` regardless (footer merges into the
+ * one hint row).
  */
 export function renderPickerRows(
   entries: PickerEntry[],
   selectedIndex: number,
   noColor: boolean,
+  unattributedCount = 0,
 ): string[] {
   const nameWidth = entries.reduce((w, e) => Math.max(w, e.name.length), 0) + 2;
+  const quotaWidth = entries.reduce(
+    (w, e) =>
+      Math.max(
+        w,
+        (e.quota !== undefined && e.quota !== "" ? e.quota : NO_QUOTA_MARK)
+          .length,
+      ),
+    0,
+  );
   const rows: string[] = [
     noColor
       ? `${PICKER_TITLE_MAIN}${PICKER_TITLE_SUB}`
@@ -2582,12 +2649,20 @@ export function renderPickerRows(
   ];
   for (let i = 0; i < entries.length; i++) {
     rows.push(
-      pickerEntryRow(entries[i], i === selectedIndex, nameWidth, noColor),
+      pickerEntryRow(
+        entries[i],
+        i === selectedIndex,
+        nameWidth,
+        quotaWidth,
+        noColor,
+      ),
     );
   }
-  rows.push(
-    noColor ? PICKER_HINT_SKIP : `${DIM_ON}${PICKER_HINT_SKIP}${INTENSITY_OFF}`,
-  );
+  const footerText =
+    unattributedCount > 0
+      ? `另有 ${unattributedCount} 个裸 claude 会话未归属 · ${PICKER_HINT_SKIP}`
+      : PICKER_HINT_SKIP;
+  rows.push(noColor ? footerText : `${DIM_ON}${footerText}${INTENSITY_OFF}`);
   return rows;
 }
 
@@ -2595,7 +2670,7 @@ export function renderPickerRows(
  * Production deps.pickProvider: arrow-key menu rendered entirely on stderr
  * (stdout stays pipe-clean). ↑↓/j/k move with wrap, Enter confirms, Esc
  * skips, ctrl-c restores the terminal then exits 130; any other key is a
- * noop (C-P1). Frame = 标题 2 行 + 分隔线 + 条目 N 行 + dim `Esc 退出`
+ * noop (C-P1). Frame = 标题 2 行 + 分隔线 + 条目 N 行 + dim `Esc 不切换`
  * 末行提示——旧的可选中「不切换」行已退化为提示（skip 走 Esc/C-g），移动
  * 只覆盖条目行。
  *
@@ -2610,15 +2685,26 @@ export function renderPickerRows(
  * its lazily-attached internal `data`) listeners are removed — so the
  * spawned claude TUI takes stdin over cleanly. The picker always completes
  * before any backend spawn.
+ *
+ * `unattributedCount` (optional) drives the bare-claude footer hint; 0 or
+ * omitted renders the plain `Esc 不切换` footer. When the positional arg is
+ * absent, the count is recovered from the entries themselves
+ * (`PickerEntry.unattributed`, attached by the claude menu path) so two-arg
+ * pickProvider wrappers still render the hint.
  */
 export function pickProviderInteractive(
   entries: PickerEntry[],
   initialIndex: number,
+  unattributedCount?: number,
 ): Promise<PickerOutcome> {
   return new Promise((resolvePromise) => {
     const stderr = process.stderr;
     const stdin = process.stdin;
     const noColor = (process.env.NO_COLOR ?? "") !== "";
+    const frameUnattributed =
+      unattributedCount ??
+      entries.find((e) => e.unattributed !== undefined)?.unattributed ??
+      0;
     const frameRows = entries.length + 4; // 标题2 + 分隔线1 + 条目N + 末行1
     let index = Math.min(
       Math.max(Math.trunc(initialIndex), 0),
@@ -2629,7 +2715,12 @@ export function pickProviderInteractive(
     // Full repaint: pure row construction + per-line clear-to-EOL so a
     // shorter previous render leaves no ghosting (残影).
     const drawFrame = (): void => {
-      for (const line of renderPickerRows(entries, index, noColor)) {
+      for (const line of renderPickerRows(
+        entries,
+        index,
+        noColor,
+        frameUnattributed,
+      )) {
         stderr.write(`${line}\x1b[K\n`);
       }
     };
@@ -2749,6 +2840,250 @@ export function pickProviderInteractive(
 
 /** Minimal shape of a readline keypress event's `key` argument. */
 type KeypressKey = PickerKeyInput;
+
+// ---------------------------------------------------------------------------
+// Provider session attribution (TTY picker) — ps scan, zero state
+// ---------------------------------------------------------------------------
+
+/**
+ * One provider's attribution facts, mapped from `extractProviderEnv()` output
+ * in the caller. Tokens live only in memory for comparison — they are never
+ * printed, logged, persisted, or embedded in any error message.
+ */
+export type SessionAttributionProvider = {
+  name: string;
+  baseUrl?: string;
+  authToken?: string;
+  apiKey?: string;
+};
+
+/** Per-provider live session counts + the bare-claude (unattributable) count. */
+export type SessionAttribution = {
+  counts: Record<string, number>;
+  unattributed: number;
+};
+
+/**
+ * Extract the `--settings <json>` value from one joined ps argv line: scan
+ * from the first `{` after `--settings` with string-aware bracket balancing
+ * (ps concatenates argv with spaces, so the JSON may contain any whitespace,
+ * and the payload itself nests objects). Returns undefined when the line has
+ * no `--settings`, no `{` after it, or never closes — the caller treats that
+ * as unattributable (honest: `--settings <file>` cannot be attributed either).
+ */
+function extractSettingsJson(line: string): string | undefined {
+  const marker = line.indexOf("--settings");
+  if (marker === -1) return undefined;
+  const start = line.indexOf("{", marker);
+  if (start === -1) return undefined;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < line.length; i++) {
+    const ch = line[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return line.slice(start, i + 1);
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Whether one process's settings env matches a provider: baseUrl strict-equal
+ * AND (authToken strict-equal OR apiKey strict-equal) — empty/missing tokens
+ * never participate, so a bare URL can never match anything (same-domain
+ * dual-plan providers are told apart by token).
+ */
+function sessionProviderMatches(
+  provider: SessionAttributionProvider,
+  baseUrl: string | undefined,
+  authToken: string | undefined,
+  apiKey: string | undefined,
+): boolean {
+  if (baseUrl === undefined || provider.baseUrl !== baseUrl) return false;
+  const tokenHit =
+    authToken !== undefined &&
+    authToken !== "" &&
+    provider.authToken === authToken;
+  const keyHit =
+    apiKey !== undefined && apiKey !== "" && provider.apiKey === apiKey;
+  return tokenHit || keyHit;
+}
+
+/**
+ * Attribute joined ps argv lines to providers (pure, total — never throws).
+ * Lines with a parseable `--settings` env matching a provider increment that
+ * provider's count; providers with identical URL+token each count the same
+ * line (accepted edge). Bare claude lines, unparseable JSON, and settings
+ * matching no provider all count as `unattributed`.
+ */
+export function parseSessionAttribution(
+  lines: string[],
+  providers: SessionAttributionProvider[],
+): SessionAttribution {
+  const counts: Record<string, number> = {};
+  let unattributed = 0;
+  for (const line of lines) {
+    const json = extractSettingsJson(line);
+    if (json === undefined) {
+      unattributed++;
+      continue;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(json);
+    } catch {
+      unattributed++;
+      continue;
+    }
+    const env =
+      typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>).env
+        : undefined;
+    if (typeof env !== "object" || env === null || Array.isArray(env)) {
+      unattributed++;
+      continue;
+    }
+    const rec = env as Record<string, unknown>;
+    const baseUrl =
+      typeof rec.ANTHROPIC_BASE_URL === "string"
+        ? rec.ANTHROPIC_BASE_URL
+        : undefined;
+    const authToken =
+      typeof rec.ANTHROPIC_AUTH_TOKEN === "string"
+        ? rec.ANTHROPIC_AUTH_TOKEN
+        : undefined;
+    const apiKey =
+      typeof rec.ANTHROPIC_API_KEY === "string"
+        ? rec.ANTHROPIC_API_KEY
+        : undefined;
+    const hits = providers.filter((p) =>
+      sessionProviderMatches(p, baseUrl, authToken, apiKey),
+    );
+    if (hits.length === 0) {
+      unattributed++;
+      continue;
+    }
+    for (const p of hits) {
+      counts[p.name] = (counts[p.name] ?? 0) + 1;
+    }
+  }
+  return { counts, unattributed };
+}
+
+/**
+ * Glue for the claude TTY menu path: scan live processes once and attribute
+ * them. Any failure (deps capability missing, spawn error, non-zero pgrep/ps)
+ * resolves to undefined — the caller degrades to no session column and no
+ * bare-session footer (cannot distinguish "none" from "scan failed"; prefer
+ * silence over a wrong number). Never throws.
+ */
+async function countProviderSessions(
+  deps: RunDeps,
+  providers: SessionAttributionProvider[],
+): Promise<SessionAttribution | undefined> {
+  if (deps.listClaudeProcessArgs === undefined) return undefined;
+  try {
+    const lines = await deps.listClaudeProcessArgs();
+    return parseSessionAttribution(lines, providers);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Production deps.listClaudeProcessArgs: `pgrep -x claude` for pids, then
+ * `ps -ww -o command= -p <pids>` (BSD flags; `-ww` defeats column truncation
+ * so long argv carrying `--settings` JSON survives). Read-only, no secrets in
+ * the commands themselves; ps output (which contains tokens) stays in memory.
+ * Exit semantics: pgrep 1 = no match → []; pgrep >1 or any ps failure →
+ * rejects (error text carries only exit codes / ps stderr — never ps stdout).
+ */
+function listClaudeProcessArgsOnDisk(): Promise<string[]> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const pgrep = spawn("pgrep", ["-x", CLAUDE_BIN], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let pidsOut = "";
+    let pgrepErr = "";
+    pgrep.stdout.on("data", (chunk: Buffer) => {
+      pidsOut += chunk.toString();
+    });
+    pgrep.stderr.on("data", (chunk: Buffer) => {
+      pgrepErr += chunk.toString();
+    });
+    pgrep.on("error", (err: NodeJS.ErrnoException) => {
+      rejectPromise(new Error(`pgrep failed to spawn: ${err.message}`));
+    });
+    pgrep.on("close", (code) => {
+      if (code === 1) {
+        resolvePromise([]); // no processes matched — not an error
+        return;
+      }
+      if (code !== 0) {
+        const msg = pgrepErr.trim();
+        rejectPromise(
+          new Error(
+            msg
+              ? `pgrep exited with code ${code}: ${msg}`
+              : `pgrep exited with code ${code}`,
+          ),
+        );
+        return;
+      }
+      const pids = pidsOut
+        .split("\n")
+        .map((s) => s.trim())
+        .filter((s) => s !== "");
+      if (pids.length === 0) {
+        resolvePromise([]);
+        return;
+      }
+      const ps = spawn("ps", ["-ww", "-o", "command=", "-p", pids.join(",")], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let psOut = "";
+      let psErr = "";
+      ps.stdout.on("data", (chunk: Buffer) => {
+        psOut += chunk.toString();
+      });
+      ps.stderr.on("data", (chunk: Buffer) => {
+        psErr += chunk.toString();
+      });
+      ps.on("error", (err: NodeJS.ErrnoException) => {
+        rejectPromise(new Error(`ps failed to spawn: ${err.message}`));
+      });
+      ps.on("close", (psCode) => {
+        if (psCode !== 0) {
+          const msg = psErr.trim();
+          rejectPromise(
+            new Error(
+              msg
+                ? `ps exited with code ${psCode}: ${msg}`
+                : `ps exited with code ${psCode}`,
+            ),
+          );
+          return;
+        }
+        resolvePromise(
+          psOut
+            .split("\n")
+            .map((s) => s.trimEnd())
+            .filter((s) => s !== ""),
+        );
+      });
+    });
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Last-provider memory (D2) — production deps.readLastProvider/writeLastProvider
@@ -3499,14 +3834,38 @@ async function runClaudeBackend(
               quotaItems.push({ name: p.name, env: envResult.env });
             }
           }
-          const quotaMap = await deps.fetchProviderQuotas(quotaItems);
+          // Session attribution runs once, in parallel with the quota fetch,
+          // on this menu path only. Any failure resolves to undefined and the
+          // picker degrades to no session column (same soft-degrade as quota).
+          const sessionProviders: SessionAttributionProvider[] = quotaItems.map(
+            (q) => ({
+              name: q.name,
+              baseUrl: q.env.ANTHROPIC_BASE_URL,
+              authToken: q.env.ANTHROPIC_AUTH_TOKEN,
+              apiKey: q.env.ANTHROPIC_API_KEY,
+            }),
+          );
+          const [quotaMap, attribution] = await Promise.all([
+            deps.fetchProviderQuotas(quotaItems),
+            countProviderSessions(deps, sessionProviders),
+          ]);
           // D5/D6 (revise-3): rows are name + quota subtitle (host is gone);
           // the remembered row carries its ●上次 marker as a structured tag
           // (rendering decides placement/color; quota text stays byte-clean).
+          // Live-session counts ride the same rows (0 included); undefined
+          // when the scan was unavailable so the column degrades per entry.
+          // The frame-level bare-claude count rides every entry too (same
+          // value) so the footer hint survives pickProvider wrappers that
+          // forward only (entries, initialIndex); undefined → degrade to 0.
           const entries: PickerEntry[] = ordered.map((p) => {
             const entry: PickerEntry = {
               name: p.name,
               quota: quotaMap.get(p.name),
+              sessions:
+                attribution === undefined
+                  ? undefined
+                  : (attribution.counts[p.name] ?? 0),
+              unattributed: attribution?.unattributed,
             };
             if (remembered !== undefined && p.name === remembered) {
               entry.tag = "上次";
@@ -3516,6 +3875,9 @@ async function runClaudeBackend(
           const picked = await deps.pickProvider(
             entries,
             memoryValid ? memoryIndex : 0,
+            // Degraded scan → 0: cannot distinguish "no bare sessions" from
+            // "scan failed", so the footer hint stays silent either way.
+            attribution?.unattributed ?? 0,
           );
           if (picked.kind === "select") {
             // Exact-name lookup (no matchProviderName): the picker returns
@@ -4478,9 +4840,10 @@ async function main(): Promise<void> {
     runClaudeInteractive: (args, cwd) => runClaudeInteractive(args, cwd),
     runAgyInteractive: (args, cwd) => runAgyInteractive(args, cwd),
     isInteractive: () => process.stdin.isTTY === true,
-    pickProvider: (entries, initialIndex) =>
-      pickProviderInteractive(entries, initialIndex),
+    pickProvider: (entries, initialIndex, unattributedCount) =>
+      pickProviderInteractive(entries, initialIndex, unattributedCount),
     fetchProviderQuotas: (items) => fetchProviderQuotasHttp(items),
+    listClaudeProcessArgs: () => listClaudeProcessArgsOnDisk(),
     readLastProvider: () => readLastProviderFromDisk(),
     writeLastProvider: (name) => writeLastProviderToDisk(name),
     runHermes: (args, timeoutMs) =>
