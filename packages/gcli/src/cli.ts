@@ -32,6 +32,7 @@ import {
   copyFileSync,
   mkdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -120,6 +121,49 @@ export const HERMES_PROVIDER_SEEDS: HermesProviderRegistry = {
 /** `status`/`rollback` 为 hermes 子命令的保留字位置参数。 */
 const HERMES_RESERVED_WORDS = new Set(["status", "rollback"]);
 
+// ---------------------------------------------------------------------------
+// zcode backend — paths & constants（ZCode 桌面版双账号切换器）
+// ---------------------------------------------------------------------------
+
+/** 切换状态记录（0o600；active = 当前挂载的数据根 profile）。 */
+export const ZCODE_STATE_PATH = `${homedir()}/.config/gcli/zcode-state.json`;
+
+/** profile A 登录态凭据（默认数据根，零改动）。 */
+export const ZCODE_A_CREDENTIALS_PATH = `${homedir()}/.zcode/v2/credentials.json`;
+
+/** profile B 数据根（ZCODE_DATA_BASE_DIR 指向；实际数据落在其下 .zcode/ 一层）。 */
+export const ZCODE_B_DATA_ROOT = `${homedir()}/.zcode-b`;
+
+/** profile B 登录态凭据。 */
+export const ZCODE_B_CREDENTIALS_PATH = `${ZCODE_B_DATA_ROOT}/.zcode/v2/credentials.json`;
+
+/** profile B 的 Electron userData（Cookies 等与主实例隔离，绕单实例锁目录）。 */
+export const ZCODE_B_USER_DATA = `${homedir()}/Library/Application Support/ZCode-B`;
+
+/** 两 profile 的单实例锁符号链接（目标 = "<hostname>-<pid>"，进程退出即清理）。 */
+export const ZCODE_A_SINGLETON_LOCK = `${homedir()}/Library/Application Support/ZCode/SingletonLock`;
+export const ZCODE_B_SINGLETON_LOCK = `${ZCODE_B_USER_DATA}/SingletonLock`;
+
+/**
+ * 归属判据（锁只证"有实例"，不分 profile——C++ 单例恒在默认 userData，见
+ * detectRunningOnDisk 注释）：实例只写自己数据根的当日日志，单实例保证两个
+ * 会话不重叠 → 运行中一方的当日日志 mtime 必然更新。
+ */
+export const ZCODE_A_LOG_DIR = `${homedir()}/.zcode/v2/logs`;
+export const ZCODE_B_LOG_DIR = `${ZCODE_B_DATA_ROOT}/.zcode/v2/logs`;
+
+/** 当日日志文件名（本地时区 YYYY-MM-DD，与 ZCode 日志命名一致）。 */
+export function zcodeTodayLogFile(now: Date = new Date()): string {
+  const y = now.getFullYear();
+  const m = `${now.getMonth() + 1}`.padStart(2, "0");
+  const d = `${now.getDate()}`.padStart(2, "0");
+  return `${y}-${m}-${d}.log`;
+}
+
+/** 切换前等待实例退出的轮询间隔 / 总上限。 */
+export const ZCODE_QUIT_POLL_MS = 500;
+export const ZCODE_QUIT_TIMEOUT_MS = 10_000;
+
 /** Provider-name allowlist (C4b). Names outside this set are rejected. */
 const PROVIDER_NAME_RE = /^[A-Za-z0-9 &._-]+$/;
 
@@ -127,7 +171,43 @@ const PROVIDER_NAME_RE = /^[A-Za-z0-9 &._-]+$/;
 // Types — DI contract (aligns with acceptance tests)
 // ---------------------------------------------------------------------------
 
-export type Subcommand = "agy" | "claude" | "api" | "hermes";
+export type Subcommand = "agy" | "claude" | "api" | "hermes" | "zcode";
+
+/**
+ * zcode 数据根 profile：a = 默认 `~/.zcode`（主账号，启动零参数零改动）；
+ * b = `~/.zcode-b`（第二账号，ZCODE_DATA_BASE_DIR + --user-data-dir 双重隔离）。
+ * 内部 id 用 a/b（状态文件 schema 稳定）；用户可见名见 ZCODE_PROFILE_DISPLAY。
+ */
+export type ZcodeProfile = "a" | "b";
+
+/** 用户可见的 profile 名（a = string 账号，b = echo 账号）。 */
+export const ZCODE_PROFILE_DISPLAY: Record<ZcodeProfile, string> = {
+  a: "string",
+  b: "echo",
+};
+
+/** 用户输入 → profile（string/a → a，echo/b → b；其余 undefined）。 */
+export function zcodeProfileFromArg(token: string): ZcodeProfile | undefined {
+  if (token === "string" || token === "a") return "a";
+  if (token === "echo" || token === "b") return "b";
+  return undefined;
+}
+
+/** zcode 子命令的 IO 面（main() 生产装配；验收测试注入假件）。 */
+export type ZcodeDeps = {
+  /**
+   * 判定各 profile 是否有存活实例。生产实现读两处 SingletonLock 符号链接的
+   * 目标 pid 并做存活探测（app 成功启动后会把自己的 argv 重写成裸名，
+   * ps/argv 检测不可靠——2026-09-28 实测）。
+   */
+  detectRunning: () => Promise<{ a: boolean; b: boolean }>;
+  /** 向 ZCode 发 AppleScript 优雅退出（只发不等；退出等待由调用方轮询）。 */
+  quitZcodeApp: () => Promise<void>;
+  /** 以目标 profile 启动 ZCode（b = 数据根 + userData 双重隔离）。 */
+  launchZcode: (profile: ZcodeProfile) => Promise<void>;
+  /** 轮询等待用；缺省真实 setTimeout（验收测试注入即时 resolve）。 */
+  sleep?: (ms: number) => Promise<void>;
+};
 
 export type SubcommandResult =
   | { subcommand: Subcommand | undefined; rest: string[] }
@@ -374,6 +454,10 @@ export type RunDeps = {
   queryLastSessionModel: () => Promise<
     { model: string; provider: string } | undefined
   >;
+
+  // --- zcode 子命令注入点（main() 一律装配；仅 zcode 路径消费；缺省 → zcode 报运行错误） ---
+
+  zcode?: ZcodeDeps;
 };
 
 export type RunOutcome = { exitCode: number; stdout: string; stderr: string };
@@ -387,6 +471,7 @@ export type RunOutcome = { exitCode: number; stdout: string; stderr: string };
  * - argv[0] === "agy"    → subcommand "agy",    rest = argv.slice(1)
  * - argv[0] === "claude" → subcommand "claude", rest = argv.slice(1)
  * - argv[0] === "api"    → subcommand "api",    rest = argv.slice(1)
+ * - argv[0] === "zcode"  → subcommand "zcode",  rest = argv.slice(1)
  * - argv empty OR argv[0] starts with "-" → subcommand undefined (default
  *   backend: claude)
  * - argv[0] any other non-empty token → error "unknown subcommand: <x>"
@@ -401,6 +486,7 @@ export function parseSubcommand(argv: string[]): SubcommandResult {
   if (first === "claude") return { subcommand: "claude", rest: argv.slice(1) };
   if (first === "api") return { subcommand: "api", rest: argv.slice(1) };
   if (first === "hermes") return { subcommand: "hermes", rest: argv.slice(1) };
+  if (first === "zcode") return { subcommand: "zcode", rest: argv.slice(1) };
   if (first.startsWith("-")) return { subcommand: undefined, rest: argv };
   return { error: `unknown subcommand: ${first}` };
 }
@@ -3086,6 +3172,140 @@ function listClaudeProcessArgsOnDisk(): Promise<string[]> {
 }
 
 // ---------------------------------------------------------------------------
+// zcode backend — production deps.zcode impls（ZCode 桌面版，仅 darwin）
+// ---------------------------------------------------------------------------
+
+/**
+ * Production deps.zcode.detectRunning。两步：
+ * ① SingletonLock（恒在默认 userData ZCode/，C++ 单例不认 --user-data-dir，
+ *    2026-09-28 实测）目标 pid 存活 → 判定"有实例"；退出清理锁，SIGKILL 残留
+ *    靠 pid 存活性兜底。
+ * ② 归属：实例只写自己数据根的当日日志，且单实例保证会话不重叠 → 当日日志
+ *    mtime 较新的一方即运行中 profile（缺失视为 0）。
+ */
+function detectRunningOnDisk(): { a: boolean; b: boolean } {
+  let target: string | undefined;
+  try {
+    target = readlinkSync(ZCODE_A_SINGLETON_LOCK);
+  } catch {
+    return { a: false, b: false }; // 锁不存在（或不可读）→ 无实例
+  }
+  const pid = parseSingletonLockPid(target);
+  if (pid === undefined) return { a: false, b: false };
+  try {
+    process.kill(pid, 0); // 0 号信号 = 仅探测存活
+  } catch (err) {
+    // ESRCH = 进程不存在（stale 锁）；EPERM = 存在但无权限（同样视为存活）
+    if ((err as NodeJS.ErrnoException).code !== "EPERM") {
+      return { a: false, b: false };
+    }
+  }
+  const mtimeOf = (dir: string): number => {
+    try {
+      return statSync(`${dir}/${zcodeTodayLogFile()}`).mtimeMs;
+    } catch {
+      return 0; // 当日无日志 = 该根今天没启动过
+    }
+  };
+  const newerIsB = mtimeOf(ZCODE_B_LOG_DIR) > mtimeOf(ZCODE_A_LOG_DIR);
+  return { a: !newerIsB, b: newerIsB };
+}
+
+/** Production deps.zcode.quitZcodeApp：osascript 优雅退出（只发不等）。 */
+function quitZcodeAppOnDisk(): Promise<void> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const osascript = spawn(
+      "osascript",
+      ["-e", 'tell application id "dev.zcode.app" to quit'],
+      { stdio: ["ignore", "ignore", "pipe"] },
+    );
+    let errOut = "";
+    osascript.stderr.on("data", (chunk: Buffer) => {
+      errOut += chunk.toString();
+    });
+    osascript.on("error", (err: NodeJS.ErrnoException) => {
+      rejectPromise(new Error(`osascript failed to spawn: ${err.message}`));
+    });
+    osascript.on("close", (code) => {
+      if (code === 0) {
+        resolvePromise();
+        return;
+      }
+      const msg = errOut.trim();
+      rejectPromise(
+        new Error(
+          msg
+            ? `osascript exited with code ${code}: ${msg}`
+            : `osascript exited with code ${code}`,
+        ),
+      );
+    });
+  });
+}
+
+const ZCODE_APP_PATH = "/Applications/ZCode.app/Contents/MacOS/ZCode";
+
+/**
+ * Production deps.zcode.launchZcode。profile a 走 `open -a ZCode`（LaunchServices
+ * 正常拉起）；profile b 直接 exec 二进制并 detached——`open --args` 在实测中
+ * 不透传参数（argv 只剩裸名），直接 exec 才能带 `--user-data-dir`（Electron
+ * userData 隔离）+ ZCODE_DATA_BASE_DIR env（数据根隔离，2026-09-28 spike 均
+ * 已实测生效）。cwd 固定 HOME：不让实例继承 gcli 的调用目录（隐私红线——
+ * 敏感仓库绝不进 ZCode）。
+ */
+function launchZcodeOnDisk(profile: ZcodeProfile): Promise<void> {
+  if (profile === "a") {
+    return new Promise((resolvePromise, rejectPromise) => {
+      const open = spawn("open", ["-a", "ZCode"], {
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      let errOut = "";
+      open.stderr.on("data", (chunk: Buffer) => {
+        errOut += chunk.toString();
+      });
+      open.on("error", (err: NodeJS.ErrnoException) => {
+        rejectPromise(new Error(`open failed to spawn: ${err.message}`));
+      });
+      open.on("close", (code) => {
+        if (code === 0) {
+          resolvePromise();
+          return;
+        }
+        const msg = errOut.trim();
+        rejectPromise(
+          new Error(
+            msg
+              ? `open exited with code ${code}: ${msg}`
+              : `open exited with code ${code}`,
+          ),
+        );
+      });
+    });
+  }
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(
+      ZCODE_APP_PATH,
+      [`--user-data-dir=${ZCODE_B_USER_DATA}`],
+      {
+        cwd: homedir(),
+        detached: true,
+        stdio: "ignore",
+        env: {
+          ...process.env,
+          ZCODE_DATA_BASE_DIR: ZCODE_B_DATA_ROOT,
+        },
+      },
+    );
+    child.on("error", (err: NodeJS.ErrnoException) => {
+      rejectPromise(new Error(`spawn ZCode failed: ${err.message}`));
+    });
+    // detached + unref：实例独立于 gcli 进程存活；spawn 成功即视为已启动
+    child.unref();
+    child.on("spawn", () => resolvePromise());
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Last-provider memory (D2) — production deps.readLastProvider/writeLastProvider
 // ---------------------------------------------------------------------------
 
@@ -3394,6 +3614,251 @@ function queryLastSessionModelFromDb(): Promise<
 // Main
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// zcode backend — pure helpers (unit-tested in cli.test.ts)
+// ---------------------------------------------------------------------------
+
+/** Parsed options for the zcode subcommand (strict: unknown flags error). */
+export interface ParsedZcodeArgs {
+  /** 位置参数：a/b = 切到对应账号；status = 查看状态。 */
+  action: "a" | "b" | "status";
+  help: boolean;
+}
+
+export type ParseZcodeResult = ParsedZcodeArgs | { error: string };
+
+/**
+ * Parse argv for `gcli zcode ...`. Strict like parseHermesArgs (unknown flags
+ * are exit-2 errors). Exactly one positional, from {a, b, status}.
+ */
+export function parseZcodeArgs(argv: string[]): ParseZcodeResult {
+  try {
+    const { values, positionals } = parseArgs({
+      args: argv,
+      options: { help: { type: "boolean" } },
+      strict: true,
+      allowPositionals: true,
+    });
+    if (positionals.length > 1) {
+      return {
+        error: `zcode: unexpected extra argument: "${positionals[1]}" (usage: gcli zcode <string|echo|status> [--help])`,
+      };
+    }
+    const action = positionals[0];
+    if (action !== undefined && action !== "status") {
+      const profile = zcodeProfileFromArg(action);
+      if (profile === undefined) {
+        return {
+          error: `zcode: unknown action: "${action}" (usage: gcli zcode <string|echo|status>)`,
+        };
+      }
+      return { action: profile, help: values.help === true };
+    }
+    return { action: action ?? "status", help: values.help === true };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** 切换状态文件形状（畸形/缺失视为无记录，不猜）。 */
+export interface ZcodeState {
+  active: ZcodeProfile;
+  /** epoch ms。 */
+  switchedAt: number;
+}
+
+/** 解析状态文件文本；任何畸形 → undefined（宁缺勿谎）。 */
+export function parseZcodeState(
+  text: string | undefined,
+): ZcodeState | undefined {
+  if (text === undefined) return undefined;
+  try {
+    const raw = JSON.parse(text) as unknown;
+    if (typeof raw !== "object" || raw === null) return undefined;
+    const { active, switchedAt } = raw as Record<string, unknown>;
+    if (active !== "a" && active !== "b") return undefined;
+    if (typeof switchedAt !== "number" || !Number.isFinite(switchedAt)) {
+      return undefined;
+    }
+    return { active, switchedAt };
+  } catch {
+    return undefined;
+  }
+}
+
+/** 序列化状态文件（单行 JSON）。 */
+export function serializeZcodeState(state: ZcodeState): string {
+  return `${JSON.stringify(state)}\n`;
+}
+
+/**
+ * SingletonLock 目标形如 "<hostname>-<pid>"（hostname 可含连字符），取最后
+ * 一段为 pid；缺失/非整数 → undefined（stale 锁交给调用方的存活探测兜底）。
+ */
+export function parseSingletonLockPid(
+  target: string | undefined,
+): number | undefined {
+  if (target === undefined || target === "") return undefined;
+  const idx = target.lastIndexOf("-");
+  if (idx < 0) return undefined;
+  const pid = Number.parseInt(target.slice(idx + 1), 10);
+  return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// zcode backend — orchestration
+// ---------------------------------------------------------------------------
+
+const defaultZcodeSleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+/** zcode 子命令入口：status / a / b 三分支。 */
+async function runZcodeBackend(
+  parsed: ParsedZcodeArgs,
+  deps: RunDeps,
+): Promise<RunOutcome> {
+  const zcode = deps.zcode as ZcodeDeps;
+  if (parsed.action === "status") {
+    return zcodeStatus(deps, zcode);
+  }
+  return zcodeSwitch(parsed.action, deps, zcode, []);
+}
+
+/**
+ * 切换到目标账号 profile：检测当前实例 → 优雅退出（失败即中止，绝不硬杀）
+ * → 以目标 profile 启动 → best-effort 写状态文件。进度走 stderr。
+ */
+async function zcodeSwitch(
+  target: ZcodeProfile,
+  deps: RunDeps,
+  zcode: ZcodeDeps,
+  logs: string[],
+): Promise<RunOutcome> {
+  const sleep = zcode.sleep ?? defaultZcodeSleep;
+  let running: { a: boolean; b: boolean };
+  try {
+    running = await zcode.detectRunning();
+  } catch (err) {
+    return {
+      exitCode: 1,
+      stdout: "",
+      stderr: `gcli: zcode: 实例探测失败: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  const runningProfile: ZcodeProfile | undefined = running.a
+    ? "a"
+    : running.b
+      ? "b"
+      : undefined;
+
+  if (runningProfile === target) {
+    return {
+      exitCode: 0,
+      stdout: "",
+      stderr: `gcli: zcode: 已在账号 ${ZCODE_PROFILE_DISPLAY[target]}，无需切换\n`,
+    };
+  }
+
+  if (runningProfile !== undefined) {
+    logs.push(
+      `正在退出账号 ${ZCODE_PROFILE_DISPLAY[runningProfile]} 的 ZCode 实例…`,
+    );
+    try {
+      await zcode.quitZcodeApp();
+    } catch (err) {
+      return {
+        exitCode: 1,
+        stdout: "",
+        stderr: `gcli: zcode: 退出请求失败: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+    // 迭代计数而非墙钟（真实 sleep 下等待 ≈ ZCODE_QUIT_TIMEOUT_MS；测试注入
+    // 即时 sleep 时不至于热烧真实墙钟）
+    for (
+      let waited = 0;
+      waited <= ZCODE_QUIT_TIMEOUT_MS;
+      waited += ZCODE_QUIT_POLL_MS
+    ) {
+      let still: { a: boolean; b: boolean };
+      try {
+        still = await zcode.detectRunning();
+      } catch {
+        still = { a: true, b: true }; // 探测失败按仍在运行处理（保守，不硬杀）
+      }
+      if (!still.a && !still.b) break;
+      if (waited + ZCODE_QUIT_POLL_MS > ZCODE_QUIT_TIMEOUT_MS) {
+        return {
+          exitCode: 1,
+          stdout: "",
+          stderr: `gcli: zcode: 实例在 ${ZCODE_QUIT_TIMEOUT_MS}ms 内未退出（不硬杀；请手动退出后重试）\n`,
+        };
+      }
+      await sleep(ZCODE_QUIT_POLL_MS);
+    }
+  }
+
+  try {
+    await zcode.launchZcode(target);
+  } catch (err) {
+    return {
+      exitCode: 1,
+      stdout: "",
+      stderr: `gcli: zcode: 启动失败: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  const ws = await deps.writeTextFileAtomic(
+    ZCODE_STATE_PATH,
+    serializeZcodeState({ active: target, switchedAt: Date.now() }),
+    0o600,
+  );
+  if (!ws.ok) {
+    logs.push(`warn: 状态文件写入失败（仅影响 status 显示）: ${ws.error}`);
+  }
+  logs.push(
+    target === "b"
+      ? "已切换到账号 echo（~/.zcode-b）；首次使用请在打开的 ZCode 里登录第二个 BigModel 账号"
+      : "已切换到账号 string（默认 ~/.zcode）",
+  );
+  return { exitCode: 0, stdout: "", stderr: logs.join("\n") };
+}
+
+/**
+ * 状态报告（stdout = 结果；只输出登录态有无与 profile 归属，绝不输出凭据内容）。
+ */
+async function zcodeStatus(
+  deps: RunDeps,
+  zcode: ZcodeDeps,
+): Promise<RunOutcome> {
+  let detected: { a: boolean; b: boolean } = { a: false, b: false };
+  try {
+    detected = await zcode.detectRunning();
+  } catch {
+    detected = { a: false, b: false }; // 探测失败降级为"无实例"，不阻塞状态查看
+  }
+  const state = parseZcodeState(await deps.readTextFile(ZCODE_STATE_PATH));
+  // 凭据只判存在性（readTextFile 的返回值即刻丢弃，绝不进入任何输出）
+  const loginA =
+    (await deps.readTextFile(ZCODE_A_CREDENTIALS_PATH)) !== undefined;
+  const loginB =
+    (await deps.readTextFile(ZCODE_B_CREDENTIALS_PATH)) !== undefined;
+  const running = detected.a
+    ? "账号 string（默认 ~/.zcode）"
+    : detected.b
+      ? "账号 echo（~/.zcode-b）"
+      : "无";
+  const lastSwitch = state
+    ? `→ ${ZCODE_PROFILE_DISPLAY[state.active]} @ ${new Date(state.switchedAt).toISOString()}`
+    : "无记录";
+  const stdout = [
+    "ZCode 双账号状态",
+    `  运行中实例: ${running}`,
+    `  profile string（默认 ~/.zcode）: ${loginA ? "已登录" : "未登录"}`,
+    `  profile echo（${ZCODE_B_DATA_ROOT}）: ${loginB ? "已登录" : "未登录"}`,
+    `  上次切换: ${lastSwitch}`,
+  ].join("\n");
+  return { exitCode: 0, stdout, stderr: "" };
+}
+
 const HELP = `Usage:
   gcli [claude] [options] [-- <args>]  wrap the claude CLI (default backend)
   gcli agy [options] [-- <args>]       wrap the agy CLI (explicit subcommand)
@@ -3514,6 +3979,24 @@ hermes backend (\`gcli hermes ...\`) — hermes agent 主模型/provider 一键�
     - 输出红线：任何 stdout/stderr/dry-run 计划只打印 key 名，永不打印 token 值。
     - 绝不修改 ~/.claude/settings.json 与 cc-switch.db（后者只读）。
     - config.yaml 结构不认识（缺 model:/providers: 段、意外嵌套）→ 报错零写盘。
+
+zcode backend (\`gcli zcode ...\`) — ZCode 桌面版双账号切换器（仅 darwin）:
+  string                切到账号 string：默认数据根 ~/.zcode，启动零参数（主实例零改动）
+  echo                  切到账号 echo：ZCODE_DATA_BASE_DIR=~/.zcode-b +
+                        --user-data-dir=…/ZCode-B 双重隔离（第二 BigModel 账号）
+  status                运行中实例归属 + 两 profile 登录态有无 + 上次切换记录
+      --help            Show this help
+
+  Notes:
+    - 切换流程 = 检测当前实例 → AppleScript 优雅退出（10s 内不退则中止，
+      绝不硬杀）→ 以目标 profile 启动 → 写状态文件（~/.config/gcli/
+      zcode-state.json，0o600，best-effort）。
+    - 两账号登录态各自持久（凭据分属两个数据根）；切到 echo 后首次使用需在
+      ZCode 里登录第二个 BigModel 账号，之后免登录。
+    - 内部 profile id：string=a、echo=b（旧命令 gcli zcode a / b 仍可用）。
+    - ZCode 3.14.3 起单实例判死无视一切隔离（2026-09-28 spike 实锤），
+      并行双开不可行——本子命令是串行切换，不是并行双开。
+    - 红线：敏感仓库（hermes-agent/martin/honeydo）不开进任何 ZCode 实例。
 
 Exit codes: 0 success | 1 backend error / timeout / empty output | 2 bad args
          | N (interactive mode: child's exit code passed through unchanged)`;
@@ -4815,6 +5298,23 @@ export async function run(argv: string[], deps: RunDeps): Promise<RunOutcome> {
     }
     return runHermesBackend(parsed, deps);
   }
+  if (sub.subcommand === "zcode") {
+    const parsed = parseZcodeArgs(sub.rest);
+    if ("error" in parsed) {
+      return { exitCode: 2, stdout: "", stderr: `gcli: ${parsed.error}` };
+    }
+    if (parsed.help) {
+      return { exitCode: 0, stdout: HELP, stderr: "" };
+    }
+    if (!deps.zcode) {
+      return {
+        exitCode: 1,
+        stdout: "",
+        stderr: "gcli: zcode: 运行环境未装配 zcode 依赖",
+      };
+    }
+    return runZcodeBackend(parsed, deps);
+  }
   const parsed = parseCliArgs(sub.rest);
   if (!isOk(parsed)) {
     return { exitCode: 2, stdout: "", stderr: `gcli: ${parsed.error}` };
@@ -4853,6 +5353,11 @@ async function main(): Promise<void> {
       writeTextFileAtomicToDisk(path, text, mode),
     copyFile: (src, dest) => copyFileOnDisk(src, dest),
     queryLastSessionModel: () => queryLastSessionModelFromDb(),
+    zcode: {
+      detectRunning: async () => detectRunningOnDisk(),
+      quitZcodeApp: () => quitZcodeAppOnDisk(),
+      launchZcode: (profile) => launchZcodeOnDisk(profile),
+    },
   };
   const r = await run(process.argv.slice(2), deps);
   if (r.stdout) process.stdout.write(`${r.stdout}\n`);

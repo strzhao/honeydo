@@ -7,7 +7,7 @@
 ```
 packages/
   cli/       主壳 @honeydo/cli：零依赖 dispatcher，spawn 兄弟包 dist 入口并透传退出码
-  gcli/      LLM 对话（claude/agy/api/hermes 四后端，cc-switch 可选 provider 源；hermes = hermes agent 模型/provider 一键切换器）；bin gcli
+  gcli/      LLM 对话（claude/agy/api/hermes 四后端，cc-switch 可选 provider 源；hermes = hermes agent 模型/provider 一键切换器；zcode = ZCode 桌面版双账号切换器，`gcli zcode string|echo|status`——3.14.3 单实例判死致并行双开不可行，见 packages/gcli/CLAUDE.md）；bin gcli
   qwen/      本地 OpenAI 兼容端点（ask/vision/models/status）；bin qwen（deprecated）
   lmedia/    本地图/视/音生成（node 壳 + python/ 推理脚本，外部栈目录供 venv）；bin lmedia
   doubao/    云端生图（火山方舟，模型 fallback 链）；bin doubao

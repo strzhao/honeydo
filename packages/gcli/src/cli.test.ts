@@ -34,7 +34,10 @@ import {
   parseHermesStateFile,
   parseKimiUsages,
   parseSessionAttribution,
+  parseSingletonLockPid,
   parseSubcommand,
+  parseZcodeArgs,
+  parseZcodeState,
   pickProviderInteractive,
   QUOTA_HIGH,
   QUOTA_MID,
@@ -42,6 +45,7 @@ import {
   runApi,
   serializeHermesRegistry,
   serializeHermesStateFile,
+  serializeZcodeState,
   stripContextSuffix,
   upsertEnvLines,
 } from "./cli.js";
@@ -2116,5 +2120,80 @@ describe("runApi retries and diagnostics", () => {
     );
     await runApi(req({ thinking: "off", maxTokens: 4000 }));
     expect(captured?.thinking).toEqual({ type: "disabled" });
+  });
+});
+
+describe("parseZcodeArgs", () => {
+  it("accepts string / echo / status positionals (canonical)", () => {
+    expect(parseZcodeArgs(["string"])).toEqual({ action: "a", help: false });
+    expect(parseZcodeArgs(["echo"])).toEqual({ action: "b", help: false });
+    expect(parseZcodeArgs(["status"])).toEqual({
+      action: "status",
+      help: false,
+    });
+  });
+
+  it("keeps a / b as internal-id aliases", () => {
+    expect(parseZcodeArgs(["a"])).toEqual({ action: "a", help: false });
+    expect(parseZcodeArgs(["b"])).toEqual({ action: "b", help: false });
+  });
+
+  it("defaults to status when no positional", () => {
+    expect(parseZcodeArgs([])).toEqual({ action: "status", help: false });
+    expect(parseZcodeArgs(["--help"])).toEqual({
+      action: "status",
+      help: true,
+    });
+  });
+
+  it("errors on unknown action (exit-2 class)", () => {
+    const r = parseZcodeArgs(["c"]);
+    expect("error" in r && r.error).toContain("unknown action");
+  });
+
+  it("errors on extra positional and unknown flags (strict)", () => {
+    expect(
+      "error" in parseZcodeArgs(["a", "b"]) && parseZcodeArgs(["a", "b"]).error,
+    ).toContain("unexpected extra argument");
+    expect(
+      "error" in parseZcodeArgs(["--dry-run"]) &&
+        parseZcodeArgs(["--dry-run"]).error,
+    ).toBeTruthy();
+  });
+});
+
+describe("parseZcodeState / serializeZcodeState", () => {
+  it("round-trips a valid state", () => {
+    const state = { active: "b" as const, switchedAt: 1790582736711 };
+    expect(parseZcodeState(serializeZcodeState(state))).toEqual(state);
+  });
+
+  it("returns undefined for missing / corrupt / wrong-shape text", () => {
+    expect(parseZcodeState(undefined)).toBeUndefined();
+    expect(parseZcodeState("")).toBeUndefined();
+    expect(parseZcodeState("not json")).toBeUndefined();
+    expect(parseZcodeState("42")).toBeUndefined();
+    expect(parseZcodeState('{"active":"c","switchedAt":1}')).toBeUndefined();
+    expect(parseZcodeState('{"active":"b"}')).toBeUndefined();
+    expect(parseZcodeState('{"active":"b","switchedAt":"x"}')).toBeUndefined();
+  });
+});
+
+describe("parseSingletonLockPid", () => {
+  it("extracts the pid after the last dash (hostname may contain dashes)", () => {
+    expect(parseSingletonLockPid("stringzhaodeMac-Studio.local-41318")).toBe(
+      41318,
+    );
+    expect(parseSingletonLockPid("host-1-24536")).toBe(24536);
+  });
+
+  it("returns undefined for missing / malformed targets", () => {
+    expect(parseSingletonLockPid(undefined)).toBeUndefined();
+    expect(parseSingletonLockPid("")).toBeUndefined();
+    expect(parseSingletonLockPid("nodash")).toBeUndefined();
+    expect(parseSingletonLockPid("host-abc")).toBeUndefined();
+    expect(parseSingletonLockPid("host-0")).toBeUndefined();
+    // "host--3"：最后一段是 "3" → 合法 pid（hostname 可含连字符的推论）
+    expect(parseSingletonLockPid("host--3")).toBe(3);
   });
 });
