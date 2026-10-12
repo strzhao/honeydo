@@ -1,6 +1,6 @@
 {
   "name": "honeydo",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "One CLI for every AI capability — chat, vision, image, video, audio. Built for AI agents.",
   "license": "MIT",
   "keywords": [
@@ -21,7 +21,8 @@
   ],
   "bin": {
     "honeydo": "packages/cli/dist/index.js",
-    "hd": "packages/cli/dist/index.js"
+    "hd": "packages/cli/dist/index.js",
+    "etts": "packages/etts/dist/cli.js"
   },
   "files": [
     "packages/cli/dist",
@@ -30,7 +31,9 @@
     "packages/lmedia/dist",
     "packages/lmedia/python",
     "packages/doubao/dist",
-    "packages/minimax/dist"
+    "packages/minimax/dist",
+    "packages/etts/dist",
+    "packages/etts/python"
   ],
   "dependencies": {
     "commander": "^13.1.0"

@@ -16,6 +16,7 @@ honeydo image gen "a cat under sakura"       # local image gen (Apple Silicon)
 honeydo image gen "logo" --engine doubao     # cloud image gen (Volcengine)
 honeydo video gen "waves at dusk" --seconds 5
 honeydo tts "你好世界"                        # MiniMax TTS
+honeydo etts gen "こんにちは" --lang ja --out hi.mp3   # free neural TTS (edge-tts)
 honeydo sfx gen "rain on a tin roof"
 hd ask "hi"                                  # short alias, same thing
 ```
@@ -45,6 +46,7 @@ Agent-friendly by contract:
 | `honeydo sfx gen/batch/trim/normalize/...` | full SFX production line | Dasheng-AudioGen local |
 | `honeydo lora list/add` | LoRA registry (style/character/speed) | local Qwen-Image LoRAs |
 | `honeydo tts` | text-to-speech, word-level subtitle timestamps | MiniMax speech-02 |
+| `honeydo etts gen/batch/voices` | free neural TTS to mp3, 15-locale default voice table, batch manifest + failure list (run `etts setup` once) | Microsoft Edge neural voices (edge-tts) |
 | `honeydo voice clone/list` | voice cloning / voice inventory | MiniMax |
 | `honeydo doctor` | local stack self-check | — |
 
@@ -80,7 +82,7 @@ honeydo doctor    # prints what's ready, what's missing, and how to set it up
 
 ## Legacy bins
 
-If you used the standalone tools, they still exist and remain compatible: `gcli`, `lmedia`, `doubao`, `minimax`. (`qwen` is deprecated — it collides with Alibaba's official qwen CLI; use `honeydo vision` / `honeydo ask --backend local`.)
+If you used the standalone tools, they still exist and remain compatible: `gcli`, `lmedia`, `doubao`, `minimax`, `etts`. (`qwen` is deprecated — it collides with Alibaba's official qwen CLI; use `honeydo vision` / `honeydo ask --backend local`.)
 
 ## Roadmap
 

@@ -1,0 +1,46 @@
+{
+  "name": "@stringzhao/etts",
+  "version": "1.0.0",
+  "description": "etts — free Microsoft neural TTS (edge-tts) as a scriptable CLI: gen / batch / voices / setup / doctor",
+  "main": "dist/cli.js",
+  "bin": {
+    "etts": "dist/cli.js"
+  },
+  "type": "module",
+  "files": [
+    "dist",
+    "python",
+    "USAGE.md"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsup --dts",
+    "watch": "tsup --dts --watch",
+    "clean": "rm -rf dist",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.11"
+  },
+  "keywords": [
+    "tts",
+    "edge-tts",
+    "neural-voices",
+    "cli",
+    "batch"
+  ],
+  "license": "MIT",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/strzhao/honeydo.git",
+    "directory": "packages/etts"
+  }
+}

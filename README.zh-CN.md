@@ -13,6 +13,7 @@ honeydo image gen "樱花下的猫"          # 本地生图（Apple Silicon）
 honeydo image gen "logo" --engine doubao   # 云端生图（火山方舟）
 honeydo video gen "黄昏的海浪" --seconds 5
 honeydo tts "你好世界"                  # MiniMax TTS
+honeydo etts gen "こんにちは" --lang ja --out hi.mp3   # 免费神经 TTS（edge-tts）
 honeydo sfx gen "雨打铁皮屋顶"
 hd ask "hi"                            # 短别名，同一个命令
 ```
@@ -42,6 +43,7 @@ agent 友好契约：
 | `honeydo sfx gen/batch/trim/...` | 音效产线全链 | Dasheng-AudioGen 本地 |
 | `honeydo lora list/add` | LoRA 注册表（风格/角色/加速） | 本地 Qwen-Image LoRA |
 | `honeydo tts` | TTS，字级时间戳字幕 | MiniMax speech-02 |
+| `honeydo etts gen/batch/voices` | 免费神经 TTS 出 mp3，15 locale 默认音色表，批量清单 + 失败清单（先跑一次 `etts setup`） | 微软 Edge 神经音色（edge-tts） |
 | `honeydo voice clone/list` | 声音克隆 / 音色列表 | MiniMax |
 | `honeydo doctor` | 本地栈自检 | — |
 
@@ -77,7 +79,7 @@ honeydo doctor    # 打印哪些就绪、缺什么、怎么补
 
 ## 旧命令兼容
 
-独立工具的旧 bin 仍然可用：`gcli`、`lmedia`、`doubao`、`minimax`。（`qwen` 已废弃——与阿里官方 qwen CLI 冲突；请改用 `honeydo vision` / `honeydo ask --backend local`。）
+独立工具的旧 bin 仍然可用：`gcli`、`lmedia`、`doubao`、`minimax`、`etts`。（`qwen` 已废弃——与阿里官方 qwen CLI 冲突；请改用 `honeydo vision` / `honeydo ask --backend local`。）
 
 ## 路线图
 

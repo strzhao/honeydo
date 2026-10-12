@@ -12,6 +12,7 @@ packages/
   lmedia/    本地图/视/音生成（node 壳 + python/ 推理脚本，外部栈目录供 venv）；bin lmedia
   doubao/    云端生图（火山方舟，模型 fallback 链）；bin doubao
   minimax/   云端 TTS/声纹克隆；bin minimax
+  etts/      免费微软神经 TTS（edge-tts：gen/batch/voices/setup/doctor，批量 + 失败清单）；bin etts
 ```
 
 ## 关键约定
@@ -27,7 +28,7 @@ packages/
 
 ```bash
 npm run build       # 全部包
-npm test            # 全部测试（gcli 377 + lmedia 84 + doubao 12 + minimax 16；qwen 无单测）
+npm test            # 全部测试（gcli 377 + lmedia 84 + doubao 12 + minimax 16 + etts 42；qwen 无单测）
 npm run typecheck   # tsc --noEmit 全部
 npm run lint        # biome（仅 packages/gcli、packages/cli 作用域）
 ```
@@ -35,5 +36,6 @@ npm run lint        # biome（仅 packages/gcli、packages/cli 作用域）
 ## 边界
 
 - lmedia 的推理栈（venv + 权重）在仓外，`LMEDIA_RUNTIME` 指定；仓内只有 node 壳 + python 驱动脚本
+- etts 的 venv（edge-tts 依赖）在仓外 `~/.etts/venv`（`ETTS_RUNTIME` 覆盖），首次用先跑 `etts setup`；需要免费 TTS/批量发音烘焙 → 看 packages/etts/USAGE.md
 - gcli 不写 `~/.claude/settings.json`；provider token 走子进程 argv（README 安全节已说明）。例外：`gcli hermes` 子命令是 hermes agent（`~/.hermes/`）的切换器，会改写 `~/.hermes/config.yaml` + `.env`（原子写 + 自动回滚；cc-switch.db 仍只读）
 - 别在能力包里加对兄弟包的 import——保持各自独立可拆
