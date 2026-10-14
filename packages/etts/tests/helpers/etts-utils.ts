@@ -72,12 +72,25 @@ export function voiceLine(stderr: string): string {
   return line ?? stderr;
 }
 
-/** afinfo 估算时长（秒）。降级口径断言（场景 2.P2/10.P1）依赖：解析失败即抛错红灯 */
+/**
+ * 估算时长（秒）。darwin 主路 afinfo；afinfo 缺失/不可解析（CI ubuntu 等）自动
+ * 兜底 ffprobe（ffmpeg 套件，ci.yml 已装）。降级口径断言（场景 2.P2/10.P1）依赖：
+ * 两路都解析不出才抛错红灯。
+ */
 export async function durationSec(file: string, timeoutMs = 20_000): Promise<number> {
-  const r = await spawnRaw('afinfo', [file], { timeoutMs });
-  const m = /estimated duration:\s*([\d.]+)\s*sec/.exec(r.stdout);
-  if (!m) throw new Error(`afinfo 未解析出时长: ${file} → ${r.stdout.slice(0, 200)}`);
-  return Number(m[1]);
+  const af = await spawnRaw('afinfo', [file], { timeoutMs });
+  const m = /estimated duration:\s*([\d.]+)\s*sec/.exec(af.stdout);
+  if (m) return Number(m[1]);
+  const ff = await spawnRaw(
+    'ffprobe',
+    ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', file],
+    { timeoutMs },
+  );
+  const s = Number(ff.stdout.trim());
+  if (ff.code === 0 && Number.isFinite(s) && s > 0) return s;
+  throw new Error(
+    `时长探测失败（afinfo+ffprobe 均未解析出）: ${file} → afinfo: ${af.stdout.slice(0, 120) || '(spawn 失败)'} / ffprobe: ${ff.stderr.slice(0, 120)}`,
+  );
 }
 
 function mergeEnv(extra?: Record<string, string | undefined>): NodeJS.ProcessEnv {

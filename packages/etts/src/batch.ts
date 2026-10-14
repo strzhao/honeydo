@@ -24,17 +24,20 @@ function fileSize(p: string): number {
 }
 
 export async function runBatch(a: BatchArgs): Promise<number> {
-  const venvErr = venvError();
-  if (venvErr) {
-    process.stderr.write(`${venvErr}\n`);
-    return 1;
-  }
+  // 参数侧校验（manifest 可读性）先于运行时校验（venv）——契约「manifest 不存在
+  // → exit==2」不得依赖 venv 是否已置备（全新机器走到参数校验时 venv 常未 setup，
+  // 先查 venv 会把坏参数误报成 exit 1，2026-10-14 CI ubuntu 实证）
   let raw: string;
   try {
     raw = fs.readFileSync(a.manifest, "utf-8");
   } catch (err) {
     process.stderr.write(`etts: cannot read manifest at ${a.manifest}: ${errText(err)}\n`);
     return 2;
+  }
+  const venvErr = venvError();
+  if (venvErr) {
+    process.stderr.write(`${venvErr}\n`);
+    return 1;
   }
 
   const { items, itemErrors } = parseManifest(raw);
