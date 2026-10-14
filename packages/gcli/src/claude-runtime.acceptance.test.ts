@@ -415,6 +415,9 @@ describe("run() argv errors // ACC-10/19/22 + P3 default --yolo", () => {
     const r = await run(["foo", "-p", "hi"], deps);
     expect(r.exitCode).toBe(2);
     expect(r.stderr).toContain("unknown subcommand");
+    // 恢复线索：列出合法子命令 + 指路 --provider（provider 名当子命令的高频误用）
+    expect(r.stderr).toContain("agy | claude | api | hermes | zcode");
+    expect(r.stderr).toContain("--provider");
     expect(deps.runAgy).not.toHaveBeenCalled();
     expect(deps.runClaude).not.toHaveBeenCalled();
   });

@@ -5276,7 +5276,18 @@ async function runHermesBackend(
 export async function run(argv: string[], deps: RunDeps): Promise<RunOutcome> {
   const sub = parseSubcommand(argv);
   if ("error" in sub) {
-    return { exitCode: 2, stdout: "", stderr: `gcli: ${sub.error}` };
+    // 恢复线索（2026-10）：「gcli kimi」这类把 provider 名当子命令的字面调用
+    // 高频出现，裸报错不列合法子命令、不指路 --provider，引导方（AI agent）只能
+    // 猜一个能跑的后端兜底（曾高频滑向 agy）。静态提示即可，不做 cc-switch DB 查询
+    // （非 TTY 零 DB 读红线）。
+    return {
+      exitCode: 2,
+      stdout: "",
+      stderr:
+        `gcli: ${sub.error}\n` +
+        `hints: valid subcommands = agy | claude | api | hermes | zcode; ` +
+        `provider 名（kimi/glm/…）不是子命令 — 用 \`gcli api -p - --provider <name>\`（脚本首选）或 \`gcli --provider <name> -p ...\`（claude 路径）`,
+    };
   }
   if (sub.subcommand === "api") {
     const parsed = parseApiArgs(sub.rest);
