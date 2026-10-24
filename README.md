@@ -48,6 +48,7 @@ Agent-friendly by contract:
 | `honeydo tts` | text-to-speech, word-level subtitle timestamps | MiniMax speech-02 |
 | `honeydo etts gen/batch/voices` | free neural TTS to mp3, 15-locale default voice table, batch manifest + failure list (run `etts setup` once) | Microsoft Edge neural voices (edge-tts) |
 | `honeydo voice clone/list` | voice cloning / voice inventory | MiniMax |
+| `honeydo sms list/code/dump` | SMS sessions / OTP codes from a paired HarmonyOS phone (agent self-service login; needs unlocked screen) | hdc + uitest UI dump |
 | `honeydo doctor` | local stack self-check | — |
 
 ## Install & configure
@@ -82,7 +83,7 @@ honeydo doctor    # prints what's ready, what's missing, and how to set it up
 
 ## Legacy bins
 
-If you used the standalone tools, they still exist and remain compatible: `gcli`, `lmedia`, `doubao`, `minimax`, `etts`. (`qwen` is deprecated — it collides with Alibaba's official qwen CLI; use `honeydo vision` / `honeydo ask --backend local`.)
+If you used the standalone tools, they still exist and remain compatible: `gcli`, `lmedia`, `doubao`, `minimax`, `etts`, `smsctl`. (`qwen` is deprecated — it collides with Alibaba's official qwen CLI; use `honeydo vision` / `honeydo ask --backend local`.)
 
 ## Roadmap
 

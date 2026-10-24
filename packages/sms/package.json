@@ -1,0 +1,48 @@
+{
+  "name": "smsctl",
+  "version": "0.1.0",
+  "description": "手机验证码拉取 CLI — 从鸿蒙手机（hdc）拉取短信会话/验证码，供 agent 自助登录/绑定",
+  "type": "module",
+  "bin": {
+    "smsctl": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsup --dts",
+    "watch": "tsup --dts --watch",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "sms",
+    "otp",
+    "verification-code",
+    "harmonyos",
+    "hdc",
+    "cli",
+    "ai-agents"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^13.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.11"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/strzhao/honeydo.git",
+    "directory": "packages/sms"
+  }
+}

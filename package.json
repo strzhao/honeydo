@@ -33,7 +33,8 @@
     "packages/doubao/dist",
     "packages/minimax/dist",
     "packages/etts/dist",
-    "packages/etts/python"
+    "packages/etts/python",
+    "packages/sms/dist"
   ],
   "dependencies": {
     "commander": "^13.1.0"

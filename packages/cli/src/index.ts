@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url)); // packages/cli/dist
 
-/** sibling package entry: gcli/doubao/minimax/etts build to cli.js, qwen/lmedia to index.js */
+/** sibling package entry: gcli/doubao/minimax/etts build to cli.js, qwen/lmedia/sms to index.js */
 const ENTRIES = {
   gcli: path.resolve(HERE, "../../gcli/dist/cli.js"),
   qwen: path.resolve(HERE, "../../qwen/dist/index.js"),
@@ -26,6 +26,7 @@ const ENTRIES = {
   doubao: path.resolve(HERE, "../../doubao/dist/cli.js"),
   minimax: path.resolve(HERE, "../../minimax/dist/cli.js"),
   etts: path.resolve(HERE, "../../etts/dist/cli.js"),
+  sms: path.resolve(HERE, "../../sms/dist/index.js"),
 } as const;
 
 type Pkg = keyof typeof ENTRIES;
@@ -106,12 +107,15 @@ Cloud media
   voice clone|list           MiniMax voice cloning / voice list
   etts gen|batch|voices      free Microsoft neural TTS (edge-tts; run "etts setup" once)
 
+Device
+  sms list [N]|code|dump     SMS sessions / OTP codes from the paired phone (hdc; needs unlocked screen)
+
 Misc
   doctor                     local media stack self-check
   --version                  print version
   help                       this help
 
-Legacy bins still work: gcli, qwen (deprecated), lmedia, doubao, minimax, etts.
+Legacy bins still work: gcli, qwen (deprecated), lmedia, doubao, minimax, etts, smsctl.
 Exit codes follow the routed package: 0 ok / 1 runtime error / 2 bad args.
 Docs: https://github.com/strzhao/honeydo
 `;
@@ -187,6 +191,8 @@ function route(cmd: string | undefined, rest: string[]): number {
       return forward("doubao", rest);
     case "etts":
       return forward("etts", rest);
+    case "sms":
+      return forward("sms", rest);
     case "doctor":
       return forward("lmedia", ["doctor", ...rest]);
 

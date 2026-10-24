@@ -13,6 +13,7 @@ packages/
   doubao/    云端生图（火山方舟，模型 fallback 链）；bin doubao
   minimax/   云端 TTS/声纹克隆；bin minimax
   etts/      免费微软神经 TTS（edge-tts：gen/batch/voices/setup/doctor，批量 + 失败清单）；bin etts
+  sms/       手机验证码拉取（hdc 启动信息 App + uitest dumpLayout 拍 UI 树解析；list/code/dump；**手机须亮屏已解锁**，锁屏拉不到）；bin smsctl / `hd sms`；用法与硬边界 → packages/sms/USAGE.md
 ```
 
 ## 关键约定
@@ -36,6 +37,7 @@ npm run lint        # biome（仅 packages/gcli、packages/cli 作用域）
 ## 边界
 
 - lmedia 的推理栈（venv + 权重）在仓外，`LMEDIA_RUNTIME` 指定；仓内只有 node 壳 + python 驱动脚本
+- sms 的设备 key 存 `~/.smsctl/config.json`（仓外，公开仓不入个人设备序列号）；env `SMS_HDC_TARGET`/`SMS_HDC_PATH` 可覆盖设备/hdc 路径；实机前提 = hdc 在线 + 手机亮屏已解锁
 - etts 的 venv（edge-tts 依赖）在仓外 `~/.etts/venv`（`ETTS_RUNTIME` 覆盖），首次用先跑 `etts setup`；需要免费 TTS/批量发音烘焙 → 看 packages/etts/USAGE.md
 - gcli 不写 `~/.claude/settings.json`；provider token 走子进程 argv（README 安全节已说明）。例外：`gcli hermes` 子命令是 hermes agent（`~/.hermes/`）的切换器，会改写 `~/.hermes/config.yaml` + `.env`（原子写 + 自动回滚；cc-switch.db 仍只读）
 - 别在能力包里加对兄弟包的 import——保持各自独立可拆
