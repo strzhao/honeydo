@@ -84,32 +84,21 @@ export async function resolveTarget(): Promise<string> {
  * list/code 用完即删；dump 子命令保留文件交调试者处置。
  */
 export async function dumpLayout(target: string): Promise<string> {
-  // aa start 失败不阻断（锁屏时 dumpLayout 仍会产出空树，由内容量守卫兜底），
-  // 但保留输出供 10106102 判别，把「锁屏」和「其他失败」分开说清楚
-  let remoteOut = "";
+  // aa start 失败不阻断（锁屏时 dumpLayout 仍会产出空树，由内容量守卫兜底——
+  // 与原型一致：远端 stderr 已丢弃，锁屏与否以 dump 内容量为准）
   try {
-    const r = await hdc([
+    await hdc([
       "-t",
       target,
       "shell",
       `aa start -b ${BUNDLE} -a ${ABILITY} >/dev/null 2>&1; sleep 2; ` +
         `uitest dumpLayout -b ${BUNDLE} -p ${REMOTE} >/dev/null 2>&1; test -s ${REMOTE}`,
     ]);
-    remoteOut = r.stdout + r.stderr;
   } catch (e) {
-    const err = e as { stdout?: string; stderr?: string; message?: string };
-    remoteOut = `${err.stdout ?? ""}${err.stderr ?? ""}`;
-    if (remoteOut.includes("10106102")) {
-      throw new Error(
-        "手机锁屏：鸿蒙禁止 hdc 自动解锁（10106102），请亮屏解锁后重试",
-      );
-    }
+    const err = e as { message?: string };
     throw new Error(
       `拉取 UI dump 失败：信息 App 未能启动或 dump 未生成。请确认手机亮屏已解锁、hdc 在线（hdc list targets）后重试${err.message ? `\n（${err.message}）` : ""}`,
     );
-  }
-  if (remoteOut.includes("10106102")) {
-    throw new Error("手机锁屏：鸿蒙禁止 hdc 自动解锁（10106102），请亮屏解锁后重试");
   }
 
   const tmp = path.join(os.tmpdir(), `smsctl.${process.pid}.${Date.now()}.json`);
