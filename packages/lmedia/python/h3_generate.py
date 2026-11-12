@@ -60,9 +60,12 @@ def parse_size(size: str):
 
 
 def atomic_save_png(img, out: str) -> None:
-    """先写临时文件再 rename——输出路径不残留半成品"""
+    """先写临时文件再 rename——输出路径不残留半成品。
+
+    临时文件后缀不可推断格式（.tmp<pid>），必须显式 format='PNG'，
+    否则 PIL 按扩展名猜格式会抛 `unknown file extension`。"""
     tmp = f"{out}.tmp{os.getpid()}"
-    img.save(tmp)
+    img.save(tmp, format="PNG")
     os.replace(tmp, out)
 
 
