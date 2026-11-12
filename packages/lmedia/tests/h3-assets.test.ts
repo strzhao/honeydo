@@ -1,6 +1,5 @@
 /** h3-assets 单测：双轴库生命周期 / 出厂预设解析 / builtin 保护 / 损坏 fail-closed（隔离 tmp 库根） */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -194,7 +193,7 @@ describe('fixture 自检', () => {
   it('fixture 文件在位', () => {
     for (const f of [fixtureA(), fixtureB()]) {
       expect(fs.existsSync(f)).toBe(true);
-      expect(spawnSync('stat', ['-f', '%z', f]).status).toBe(0);
+      expect(fs.statSync(f).size).toBeGreaterThan(0);
     }
   });
 });
