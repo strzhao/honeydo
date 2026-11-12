@@ -95,14 +95,19 @@ Chat & vision
   status                     local endpoint health
 
 Image / video / sound (local, Apple Silicon)
-  image gen <prompt>         local image gen (--engine doubao → cloud fallback)
-  image edit|upscale|serve   image edit / upscale / daemon
+  image gen <prompt>         image gen; h3 = default local engine (MiniMax-H3 two-stage,
+                             --style/--char builtin picturebook/pipi assets; --engine doubao → cloud;
+                             local|qwen = legacy Qwen stack, deprecated ~108GB re-download)
+  image edit|batch|upscale   h3 dual-reference edit (Picture 1 char / Picture 2 style) / batch / upscale
+  image style|char           style/char asset library (add/list/remove/verify; builtin presets)
+  image setup|enable|disable image stack setup / capability switch / status
   video gen|setup|list-res   local video gen (mmh3turbo)
   sfx gen|batch|trim|...     sound-effect production line
-  lora list|add              LoRA registry
+  lora list|add              LoRA registry (legacy qwen image stack)
 
 Cloud media
-  image gen --engine doubao  Doubao (Volcengine Ark) cloud image
+  image gen --engine doubao  Doubao (Volcengine Ark) cloud image (also usable as fallback when
+                             the local image capability is disabled)
   tts <text>                 MiniMax text-to-speech
   voice clone|list           MiniMax voice cloning / voice list
   etts gen|batch|voices      free Microsoft neural TTS (edge-tts; run "etts setup" once)
@@ -158,11 +163,27 @@ function route(cmd: string | undefined, rest: string[]): number {
     case "image": {
       if (rest[0] === "gen") {
         const [engine, args] = takeFlag(rest.slice(1), "--engine");
-        if (engine === undefined || engine === "local")
+        if (engine === undefined || engine === "h3")
           return forward("lmedia", ["image", "gen", ...args]);
+        if (engine === "local")
+          return forward("lmedia", [
+            "image",
+            "gen",
+            ...args,
+            "--engine",
+            "local",
+          ]);
+        if (engine === "qwen")
+          return forward("lmedia", [
+            "image",
+            "gen",
+            ...args,
+            "--engine",
+            "qwen",
+          ]);
         if (engine === "doubao") return forward("doubao", args);
         process.stderr.write(
-          `honeydo: unknown --engine "${engine}" (expected local|doubao)\n`,
+          `honeydo: unknown --engine "${engine}" (expected local|h3|qwen|doubao)\n`,
         );
         return 2;
       }

@@ -11,7 +11,7 @@ export function runPython(
   python: string,
   script: string,
   payload: Record<string, unknown>,
-  opts: { quiet?: boolean } = {}
+  opts: { quiet?: boolean; acceptFailure?: boolean } = {}
 ): Promise<PyResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(python, [script, JSON.stringify(payload)], {
@@ -30,14 +30,21 @@ export function runPython(
       stderrTail = (stderrTail + text).slice(-2000);
     });
     child.on('close', (code) => {
-      if (code !== 0) return reject(new Error(`python 退出码 ${code}\n${stderrTail}`));
       const lines = stdoutBuf.trim().split('\n').filter(Boolean);
       const lastLine = lines[lines.length - 1] ?? '';
+      let parsed: PyResult | null = null;
       try {
-        resolve(JSON.parse(lastLine));
+        parsed = JSON.parse(lastLine) as PyResult;
       } catch {
-        reject(new Error(`无法解析 python 输出: ${lastLine}\n${stderrTail}`));
+        parsed = null;
       }
+      if (code !== 0) {
+        // h3 逐条审计：条目级失败不中断其余，python 非零退出时仍要拿到 stdout 里的结果 JSON
+        if (opts.acceptFailure && parsed) return resolve({ ...parsed, _exitCode: code, _stderrTail: stderrTail });
+        return reject(new Error(`python 退出码 ${code}\n${stderrTail}`));
+      }
+      if (parsed) return resolve(parsed);
+      reject(new Error(`无法解析 python 输出: ${lastLine}\n${stderrTail}`));
     });
   });
 }

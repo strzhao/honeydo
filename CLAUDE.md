@@ -10,6 +10,7 @@ packages/
   gcli/      LLM 对话（claude/agy/api/hermes 四后端，cc-switch 可选 provider 源；**用 kimi/glm 等第三方模型 → `gcli api -p - --provider kimi`（脚本首选）或 `gcli --provider kimi -p ...`（claude 路径），provider 名不是子命令、不能写 `gcli kimi`**；hermes = hermes agent 模型/provider 一键切换器；zcode = ZCode 桌面版双账号切换器，`gcli zcode string|echo|status`——3.14.3 单实例判死致并行双开不可行，见 packages/gcli/CLAUDE.md）；bin gcli
   qwen/      本地 OpenAI 兼容端点（ask/vision/models/status）；bin qwen（deprecated）
   lmedia/    本地图/视/音生成（node 壳 + python/ 推理脚本，外部栈目录供 venv）；bin lmedia
+             图像默认 H3 引擎（MiniMax-H3 两段式 + 出厂风格 picturebook/角色 pipi 双轴内置，出版必须双参考 edit）；旧 Qwen 栈 --engine local|qwen 已 deprecated；H3 用法/配方纪律/排障 → packages/lmedia/USAGE.md「H3 图像引擎」节
   doubao/    云端生图（火山方舟，模型 fallback 链）；bin doubao
   minimax/   云端 TTS/声纹克隆；bin minimax
   etts/      免费微软神经 TTS（edge-tts：gen/batch/voices/setup/doctor，批量 + 失败清单）；bin etts
@@ -36,7 +37,7 @@ npm run lint        # biome（仅 packages/gcli、packages/cli 作用域）
 
 ## 边界
 
-- lmedia 的推理栈（venv + 权重）在仓外，`LMEDIA_RUNTIME` 指定；仓内只有 node 壳 + python 驱动脚本
+- lmedia 的推理栈（venv + 权重）在仓外，`LMEDIA_RUNTIME` 指定（图像 H3 栈另有 `H3_RUNTIME`，权重 126GB 不在 setup 下载范围）；仓内只有 node 壳 + python 驱动脚本 + 出厂资产 assets/（随包发布，勿引用外盘路径）
 - sms 的设备 key 存 `~/.smsctl/config.json`（仓外，公开仓不入个人设备序列号）；env `SMS_HDC_TARGET`/`SMS_HDC_PATH` 可覆盖设备/hdc 路径；实机前提 = hdc 在线 + 手机亮屏已解锁
 - etts 的 venv（edge-tts 依赖）在仓外 `~/.etts/venv`（`ETTS_RUNTIME` 覆盖），首次用先跑 `etts setup`；需要免费 TTS/批量发音烘焙 → 看 packages/etts/USAGE.md
 - gcli 不写 `~/.claude/settings.json`；provider token 走子进程 argv（README 安全节已说明）。例外：`gcli hermes` 子命令是 hermes agent（`~/.hermes/`）的切换器，会改写 `~/.hermes/config.yaml` + `.env`（原子写 + 自动回滚；cc-switch.db 仍只读）

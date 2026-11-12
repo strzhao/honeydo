@@ -29,3 +29,11 @@
 **Scenario**: 对任何经服务端编码的媒体生成产物（TTS 音频、生图、生视频）写验收断言或 E2E 硬断言时，尤其是「同参数两次调用应产出一致结果」类谓词。
 **Lesson**: 服务端编码非确定性——同参数两轮产物字节级必异，禁止 sha256/字节相等断言；改用三件兜底：引擎侧回显一致（stderr/响应元数据中实际使用的引擎/音色标识）+ 时长/尺寸差在阈值内 + 格式与尺寸 sanity。字节级「不等」断言（异参数必异产物）可保留硬判。
 **Evidence**: 同音色同文本两轮合成：sha256 完全不同而时长逐位全等（1.896s）、MPEG 格式/声道全等、stderr 音色回显全等；某验收套件首轮 4 个失败中 2 个皆此因，按预注册降级口径改判后功能零缺陷。
+### [2026-11-12] 本地大模型 CLI 的 mock 影响面总表：seam 显式声明到每个分叉
+<!-- tags: mock, testing, seam, cli, python, lmedia, inference -->
+**Background**: lmedia h3 image 封装的红队验收需要 53 条谓词在 CI 秒级求值，但真实推理是外盘 126GB 权重 + 单张 8-10 分钟——mock 必须覆盖全部执行分叉，漏一处该分叉的测试就不可达（如 setup 的 pip 安装、qwen 引擎分流、batch 失败注入）。
+**Choice**: 设计文档强制「mock 影响面总表」逐分叉显式声明：① python 推理脚本 = 跳模型加载、stderr 阶段标记（`[h3:encode]`/`[h3:denoise]`，红队断言顺序）、**标准库手写最小 PNG（zlib+struct，禁止依赖 Pillow——裸桩 venv 无第三方包）且尺寸 = quality 档名义尺寸**（resolution 契约回显口径）② setup = 真 venv 跳 pip/冒烟 ③ 引擎分流 = qwen 告警后走同一 mock 管道 ④ 失败注入 = 场景标记约定（`@fail` 前缀）。配合三件套：隔离 env 全清单（每类状态独立临时目录）、文件锁观测时间戳行（并发串行断言判据）、stdout 末行单行 JSON 协议（run-python 范式）。
+**Alternatives rejected**: mock 里用 Pillow 画图（与 setup 跳 pip 矛盾，plan-reviewer 第 3 轮抓出三方矛盾）；仅 mock python 不 mock 引擎分流（qwen 路径谓词不可求值）；手改 index.json 造 fixture（污染 SSOT 语义，必须走 CLI add 注入）。
+**Trade-offs**: mock 与真实的结构一致性靠纪律维持（encode.pt 落盘/输出契约全同），无类型层保证；名义尺寸 PNG 数 KB 成本可忽略。
+**Evidence**: 53 条谓词全绿 + qa-reviewer Section C 零反模式 + 场景 8.P1 用锁时间戳行 kill no-op mutation。
+

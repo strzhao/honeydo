@@ -6,6 +6,7 @@
 import type { Command } from 'commander';
 import { gateAdvice, imagePreflight, imageStatePath, readImageGate, writeImageState } from '../lib/image-state.js';
 import { pingDaemon, stopDaemon, type ServeMode } from '../lib/serve.js';
+import { h3DisableHook } from './image.js';
 
 const MODES: ServeMode[] = ['gen', 'edit'];
 
@@ -48,6 +49,8 @@ function registerDisable(image: Command): void {
         const file = writeImageState(false, { reason: opts.reason });
         console.log(`✓ 图像能力已禁用（${file}）`);
       }
+      // H3 无 daemon 可停；GPU 串行锁的死进程遗留锁顺手回收（活锁不硬抢，只报告）
+      h3DisableHook();
       console.log(
         `  恢复: lmedia image enable\n` +
         `  云端替代: honeydo image gen "<prompt>" --engine doubao\n` +

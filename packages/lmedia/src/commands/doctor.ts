@@ -3,7 +3,6 @@ import type { Command } from 'commander';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { resolveVideoRuntime } from '../lib/runtime.js';
-import { loadRegistry } from '../lib/registry.js';
 import { imagePreflight, readImageGate } from '../lib/image-state.js';
 import { hasCommand } from '../lib/which.js';
 import { pingDaemon, type ServeMode } from '../lib/serve.js';
@@ -38,9 +37,10 @@ export function registerDoctor(program: Command): void {
         console.log(`· runtime/venv/模型快照/LoRA 检查已跳过；恢复: lmedia image enable`);
       } else {
         const items = imagePreflight();
-        for (const it of items) console.log(`${it.ok ? '✓' : '✗'} ${it.name}${it.ok ? '' : ` → ${it.fix}`}`);
-        for (const l of loadRegistry()) {
-          console.log(`${fs.existsSync(l.path) ? '✓' : '✗'} LoRA: ${l.name}`);
+        // ✓ 走 stdout（结果）；✗ 走 stderr（异常 + 修复指引）——doctor exit 1 时 stderr 含缺失项与指引
+        for (const it of items) {
+          if (it.ok) console.log(`✓ ${it.name}`);
+          else console.error(`✗ ${it.name} → ${it.fix}`);
         }
         imageOk = items.every((i) => i.ok);
       }

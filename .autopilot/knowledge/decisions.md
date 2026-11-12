@@ -21,3 +21,10 @@
 **Alternatives rejected**: 完全离线栈（Kokoro 无粤语、sherpa-onnx 无 ja/yue、CosyVoice Mac 部署重且吞吐差）；macOS say 离线兜底引擎（音质机器味，闪卡场景错误语调比没有音频更糟）。
 **Trade-offs**: 长期依赖社区猫鼠修复节奏，微软可随时再断；封锁窗口内新语言首烘焙需等修复或手动指定可用分支。
 **Evidence**: 2026-10-12 实测：PyPI 7.2.8 合成 403（WebSocket 握手拒绝、0 字节产物）；修复分支合成成功（ja 3.8s / yue 5.3s 有效 MPEG L3 48kbps mp3）；git 主分支不含修复（PR 尚未 merge），必须装 fork head。
+### [2026-11-12] lmedia image 引擎迁移：h3 默认 / Qwen deprecated / doubao 云端保留
+<!-- tags: lmedia, image, engine, minimax-h3, gate, migration -->
+**Background**: MiniMax H3-Image（33B DiT+Qwen3VL 塔，6 步蒸馏无 CFG 无负向）开源次日完成本地封装实测：16MP 甜点档达绘本产线质量级（对照 Seedream 原版验收），角色一致性 edit 路径优于产线现役 Qwen-Edit；纯 t2i 零和（风格形容词→AI 味均值 / 物理约束→角色塌），出版必须双参考 edit（Picture 1 角色 + Picture 2 风格锚，弱引用）。原 Qwen 栈权重已删（image disable 态）。
+**Choice**: h3 为 lmedia image 默认本地引擎（`--engine h3`，无 flag 亦 h3）；Qwen 代码路径保留标 deprecated（mock 下仍可跑，告警不阻断）；doubao 云端保留快速单张。资产双轴分离：风格（picturebook 出厂预设）与角色（pipi 出厂预设）各自 SSOT 库（`~/.config/limg/h3-styles|chars`，对齐 sfx lib），换 IP/换风格只 add 资产不改包。gate fail-closed 三态保留，preflight 换 h3 检查项（venv + transformer_diffusers×12 分片 + text_encoder×14 分片——**分片计数必须按子路径，顶层另有 pdd_fused_heads 不计入**）。
+**Alternatives rejected**: 新建独立包（lmedia image 设施可复用且用户明确选扩展）；Qwen 双引擎并列（权重已删短期不可用，并列制造困惑）；训练风格 LoRA（现成 LoRA 全是视频模型 FL2VA 架构不兼容、自训无工具链且 A100 ¥50-150/风格，已验收页自锚定拿 80% 收益）。
+**Trade-offs**: diffusers 依赖必须 git main（PyPI 0.42.1 无 minimax_h3_image 模块），setup 走 `pip install git+...`；128GB 统一内存两塔不能同驻 → 两段式（encode 存 embedding 退进程 → generate 续跑）；HF 权重下载只给指引不进 setup（126GB）。
+

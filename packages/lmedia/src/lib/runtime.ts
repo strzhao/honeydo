@@ -56,7 +56,7 @@ export function resolveRuntimeRoot(): string {
 }
 
 /** CLI 自带 python 驱动目录（<root>/python）。dist 与 tsx 源码两种运行形态都兼容 */
-function pythonDriverDir(): string {
+export function pythonDriverDir(): string {
   const candidates = [
     path.resolve(HERE, '..', 'python'),      // dist/index.js → <pkg>/python
     path.resolve(HERE, '..', '..', 'python'), // src/lib/runtime.ts（tsx dev）→ <pkg>/python

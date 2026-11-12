@@ -1,0 +1,9 @@
+{
+ "key": "picturebook",
+ "kind": "style",
+ "note": "little-bee 绘本水彩画风（线上原版 PGA-P0 锚页逆向；C1c edit 双参考配方 2026-11-12 产线验证）",
+ "anchor": "anchor-pga-p0.png",
+ "style_sentence": "保持相同的水彩纸纹颗粒、柔和的色彩晕染与洇开边缘、暖金色的逆光光斑语言、草地与蒲公英的场景元素、角色圆润可爱的造型比例",
+ "negatives": "无文字，无水印，无柔焦光晕，无圆形光斑。",
+ "template": "Picture 1 是角色参考：{char_identity}，不要改变比例，不要简化特征。\nPicture 2 是画风参考：{style_sentence}，画风自由适配到新构图。\n{scene}\n{negatives}"
+}

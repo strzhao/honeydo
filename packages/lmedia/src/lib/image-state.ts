@@ -16,8 +16,8 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { IMAGE_SNAPSHOT_REPOS, imageHubDir, resolveRuntimeRoot } from './runtime.js';
-import { resolveEsrganPath } from './esrgan.js';
+import { builtinAssetsRoot } from './h3-assets.js';
+import { h3StackChecks, resolveH3Runtime } from './h3-runtime.js';
 
 /** 状态文件路径覆盖（测试隔离 / 多栈并存用） */
 export const IMAGE_STATE_ENV = 'LMEDIA_IMAGE_STATE';
@@ -116,57 +116,11 @@ export interface PreflightItem {
   fix: string;
 }
 
-const VENV_FIX = '图像 venv 未就绪：按 packages/lmedia/USAGE.md「图像」小节重建 .venv / .venv-train';
-const snapDir = (repo: string) => path.join(imageHubDir(), `models--${repo.replace('/', '--')}`, 'snapshots');
-
-/** 快照判据与 runtime.snapOf 一致：snapshots 目录存在且非空 */
-function hasSnapshot(repo: string): boolean {
-  try {
-    const d = snapDir(repo);
-    return fs.existsSync(d) && fs.readdirSync(d).length > 0;
-  } catch {
-    return false;
-  }
-}
-
-/** HF 缓存里那个 repo 的下载指引 */
-export function snapshotFix(repo: string): string {
-  return `HF_HUB_OFFLINE=0 hf download ${repo}（~54GB；网络差可 HF_ENDPOINT=https://hf-mirror.com）`;
-}
-
 /**
  * 图像栈就绪性检查（doctor 与 `image enable/status` 共用；**永不抛**）。
- * 刻意不调 resolveRuntime()——它在快照缺失时必抛（runtime.ts:119），
- * 而那正是本探针最需要如实报告的场景。标签与 doctor 既有输出逐字一致。
+ * 2026-11 H3 迁移：检查项从 Qwen 快照/ESRGAN 换为 H3 栈（venv / 双权重分片 / 出厂资产）——
+ * 细项与 fix 指引统一在 h3-runtime.h3StackChecks（doctor/setup/preflight 三处共用，避免漂移）。
  */
 export function imagePreflight(): PreflightItem[] {
-  const root = resolveRuntimeRoot();
-  return [
-    {
-      name: 'runtime root',
-      ok: fs.existsSync(root),
-      fix: `设 LMEDIA_RUNTIME=${root} 指向本地生成栈，或 ln -s <栈目录> ~/.lmedia/runtime`,
-    },
-    {
-      name: 'pythonGen (.venv-train)',
-      ok: fs.existsSync(path.join(root, '.venv-train', 'bin', 'python')),
-      fix: VENV_FIX,
-    },
-    {
-      name: 'pythonFast (.venv)',
-      ok: fs.existsSync(path.join(root, '.venv', 'bin', 'python')),
-      fix: VENV_FIX,
-    },
-    // 标签取 repo 短名（Qwen-Image-2512），与 doctor 既有输出逐字一致，不破坏外部匹配
-    ...IMAGE_SNAPSHOT_REPOS.map((repo) => ({
-      name: `[image] ${repo.split('/')[1]} 快照`,
-      ok: hasSnapshot(repo),
-      fix: snapshotFix(repo),
-    })),
-    {
-      name: '[image] Real-ESRGAN 权重',
-      ok: fs.existsSync(resolveEsrganPath()),
-      fix: '缺 RealESRGAN_x2.pth（~64MB）：见 USAGE.md「图像」小节，或 LMEDIA_REALESRGAN_PATH 指定',
-    },
-  ];
+  return h3StackChecks(resolveH3Runtime(), builtinAssetsRoot());
 }

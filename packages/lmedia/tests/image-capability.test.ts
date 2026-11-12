@@ -87,9 +87,10 @@ describe('开关闭环（退出码 0=可跑图像命令）', () => {
     const r = run(['image', 'enable'], home);
     expect(readState(home).enabled).toBe(true);
     expect(r.stdout).toContain('图像能力已启用');
-    // 缺口清单随 exit 1 走 stderr（与仓内「结果 stdout / 异常 stderr」惯例一致）
-    expect(r.stderr).toContain('Qwen-Image-2512 快照');
-    expect(r.stderr).toContain('hf download');
+    // 缺口清单随 exit 1 走 stderr（与仓内「结果 stdout / 异常 stderr」惯例一致）；
+    // 2026-11 H3 迁移：检查项从 Qwen 快照换为 H3 栈（venv / 双权重分片 / 出厂资产）
+    expect(r.stderr).toContain('H3 image 权重分片');
+    expect(r.stderr).toContain('lmedia image setup');
     expect(r.status).toBe(1);
   });
 });
@@ -111,9 +112,9 @@ describe('gate 分域（禁用态）', () => {
     expect(r.stderr).not.toContain('运行时未找到'); // gate 必须早于 resolveRuntime
   });
 
-  it('edit 被拦（先于参考图存在性校验）', () => {
+  it('edit 被拦（先于参数校验）', () => {
     const home = disabledHome();
-    const r = run(['image', 'edit', '测试', '--ref', '/nope/missing.png'], home);
+    const r = run(['image', 'edit', '测试'], home);
     expect(r.status).toBe(1);
     expect(r.stderr).toContain('图像能力已禁用');
     expect(r.stderr).not.toContain('运行时未找到');
@@ -218,7 +219,8 @@ describe('doctor 与开关的联动', () => {
 
   it('未禁用但资产缺失：doctor 仍 exit 1（豁免只在禁用态）', () => {
     const r = run(['doctor'], freshHome());
-    expect(r.stdout).toContain('✗ [image] Qwen-Image-2512 快照');
+    // ✗ 项走 stderr（含缺失项与修复指引）
+    expect(r.stderr).toContain('✗ [image] H3 image 权重分片');
     expect(r.status).toBe(1);
   });
 });

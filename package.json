@@ -30,6 +30,7 @@
     "packages/qwen/dist",
     "packages/lmedia/dist",
     "packages/lmedia/python",
+    "packages/lmedia/assets",
     "packages/doubao/dist",
     "packages/minimax/dist",
     "packages/etts/dist",

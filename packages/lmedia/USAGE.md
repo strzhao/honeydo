@@ -4,6 +4,7 @@
 
 > 何时用它：任何「要出图/出视频/出音效」的需求——绘本插画、素材图、原型图、角色一致性生产、绘本页微动视频、角色签名音/环境音。
 > 边界：**图片理解**用 `qwen` CLI（别搞混）；**云端快速单张**可用 `doubao`；本地批量/一致性/免成本生产用 `lmedia`。
+> 图像引擎：**默认 H3**（MiniMax-H3 本地两段式，`--engine h3` 可省略）；`--engine local|qwen`=旧 Qwen 栈（deprecated，权重需重下 ~108GB）；云端 `honeydo image gen --engine doubao`。
 
 ## 命令速查
 
@@ -55,8 +56,16 @@ lmedia sfx setup                                 # 幂等创建 .venv-audio（uv
 ```
 
 ```bash
-# 文生图（官方 true CFG 4.0 + 中文负向模板已内置；风格+角色 LoRA 自动叠加、触发词自动注入、可选超分到发布尺寸）
-lmedia image gen "午后庭院，小蜜蜂男孩蹲在草地上推红色小汽车" \
+# ── H3 图像引擎（默认本地：MiniMax-H3 两段式 + 出厂风格/角色双轴；详见下方「H3 图像引擎」节）──
+lmedia image edit "午后阳光洒落的草地上，皮皮蹲在地上推红色小汽车" \
+  --style picturebook --char pipi -o page.png          # 出版路径：双参考 edit（Picture 1 角色 / Picture 2 风格）
+lmedia image gen "午后庭院" --quality draft -o draft.png  # t2i 纯文本草稿（双轴零和，仅定位验证用）
+lmedia image batch -m pages.json -o out/                # 清单批量（encode/generate 各一次加载 + GPU 串行锁）
+lmedia image style list                                 # 风格/角色资产库（[builtin] 出厂预设 picturebook/pipi）
+lmedia image setup                                      # 幂等建 venv（权重 126GB 不在下载范围，只校验给指引）
+
+# 文生图 · 旧 Qwen 栈（deprecated：权重需重下 ~108GB；风格+角色 LoRA 自动叠加、触发词自动注入）
+lmedia image gen "午后庭院，小蜜蜂男孩蹲在草地上推红色小汽车" --engine local \
   --style lbwatercolor --char pipi --upscale -o page.png
 
 # 快速档草稿（Lightning 8 步蒸馏 LoRA，cfg=1，~1/4 耗时；可叠 LoRA；--fast 4 极速档）
@@ -105,6 +114,66 @@ lmedia image enable                     # 恢复；资产缺失时列出重下�
 lmedia doctor
 ```
 
+## H3 图像引擎（默认本地，2026-11-12 产线验证）
+
+MiniMax-H3-Image 本地两段式推理（文本塔与 DiT 不同驻，128GB 统一内存约束）。**双轴出厂资产内置**：`picturebook` 风格锚（little-bee 绘本水彩，PGA-P0 锚页逆向）+ `pipi` 角色卡（小蜜蜂男孩官方 2048²）。外部一条命令出产线级图。
+
+### 命令面与输出契约
+
+```bash
+# 出版路径：edit + 双参考（出厂预设直接解析，用户库 > 出厂预设）
+lmedia image edit "<场景文字>" --style picturebook --char pipi -o page.png
+lmedia image edit "<场景>" --style picturebook --char pipi --quality publish -o page.png  # 16MP 甜点档
+lmedia image edit "<场景>" -o page.png --json
+# → {"engine":"h3","quality":"publish","resolution":"2736x1536","style":"picturebook","char":"pipi","seed":42,"output":".../page.png","elapsed_s":…}
+
+# 纯 t2i（草稿专用：风格 vs 角色双轴互斥抵消，双轴 t2i 零和）
+lmedia image gen "<场景>" --quality draft -o draft.png      # 默认引擎即 h3，--engine h3 可省略
+
+# 批量（清单 [{"scene","out","style"?,"char"?,"seed"?,"size"?}]，-m 文件或 - stdin）
+lmedia image batch -m pages.json -o out/                     # 默认 stdout 一行 = report.json 绝对路径
+# report.json: {generatedAt, items:[{scene, out, status:'ok'|'failed', reason?, style?, char?, elapsed_s}]}
+# 条目级失败不中断其余；整体 exit 1
+
+# 质量：draft 2048x1152 直出；publish 5472x3072 生成后 LANCZOS 缩回 2736x1536（16MP 甜点档）
+```
+
+退出码 0 成功 / 1 运行错误（权重缺失、IO、推理失败；无半成品残留——先写临时文件再 rename）/ 2 参数错误（未知引擎、非法 quality/key、缺必填）。默认 stdout 恰好一行 = PNG 绝对路径；`--json` = 单行冻结字段 JSON；进度/阶段标记（`[h3:encode]`/`[h3:denoise]`）全走 stderr。
+
+### 配方纪律（C1c 定版配方，2026-11-12 产线验证）
+
+1. **出版必须双参考 edit**——纯 t2i 双轴零和（风格 vs 角色互抵），只配草稿定位
+2. 分工句式自动组装：`Picture 1 是角色参考：<身份锁定句>…` + `Picture 2 是画风参考：<画风句>…` + 场景 + 负向表（`无文字，无水印，无柔焦光晕，无圆形光斑。`），模板可被 style.json 覆写
+3. 弱引用 + 分工句是关键：参考图只给图不给文字锚会漂；省略某轴则不注入对应分工句
+4. GPU 串行锁：gen/edit/batch 全部走 `~/.lmedia/h3.lock`（`H3_LOCK` 可覆盖）；batch encode/generate 各只加载一次模型
+
+### 资产库（style / char 双轴 SSOT）
+
+```bash
+lmedia image style list                    # 出厂 [builtin] picturebook + 用户库
+lmedia image char list                     # 出厂 [builtin] pipi + 用户库
+lmedia image style add mystyle --anchor 锚页.png [--template 模板.txt] [--note 说明]
+lmedia image char add mychar --ref 角色卡.png [--identity 身份锁定句.txt] [--note 说明]
+lmedia image style verify [key]            # 对账：文件在位 + 内容一致（漂移 ✗ exit 1）
+lmedia image style remove mychar-key       # 仅用户库可删；出厂 key → exit 2「builtin 不可删」
+```
+
+- 资产文件**拷贝入库**（不引用原路径），sha256 查重幂等；key 规则 `^[a-z0-9-]+$`
+- 库根：`~/.config/limg/h3-styles/`、`~/.config/limg/h3-chars/`（`H3_STYLES_LIB`/`H3_CHARS_LIB` env 可覆盖，测试隔离）
+- 清单损坏（非法 JSON）→ 报损坏 exit 1，**绝不重建**（防丢账）
+
+### setup / doctor / 栈解析
+
+```bash
+lmedia image setup     # 幂等：uv venv 优先回退 python3 -m venv --copies，装 torch/transformers/accelerate/safetensors/pillow + diffusers git main
+lmedia doctor          # [image] 节 = h3 检查（venv / image 权重 12 分片 / tower 权重 14 分片 / 出厂资产）
+```
+
+- 栈根解析优先级：`H3_RUNTIME` env > `$LMEDIA_RUNTIME/h3`（`venv/`+`weights/image`+`weights/tower` 新布局）> legacy 形态（`venv/`+`image/`+`tower/` 同层，外盘布局），迁移期两形态均识别
+- **权重 126GB 不在 setup 下载范围**：setup 只建 venv，权重缺失时 preflight/doctor 给在位性检查与指引（image= `transformer_diffusers/` 12 个 safetensors 分片；tower= `text_encoder/` 14 个分片，顶层 `pdd_fused_heads.safetensors` 不计入）
+- 能力开关沿用：`image enable` 后 h3 preflight 通过才 usable；`image disable` 拦 gen/edit/batch（h3 无 daemon，死进程遗留锁自动回收）
+- 排查口诀：栈不在位先 `lmedia image setup`（建 venv）→ 权重自行就位 → `lmedia doctor` 复核
+
 ## 引导与负向（2026-08 修复，重要行为变化）
 
 历史 bug：`guidance_scale` 参数被 diffusers **静默忽略**（仅对 guidance-distilled 模型生效），且未传 `negative_prompt` 导致 true CFG 从未启用——**修复前所有图都是无引导生成的**，模型真实水平未发挥。现在：
@@ -117,6 +186,9 @@ lmedia doctor
 
 ## 运行时约定
 
+- **图像引擎**：默认 H3（`--engine h3` 可省略）；`--engine local|qwen`=旧 Qwen 栈（deprecated，权重需重下 ~108GB）；云端 `--engine doubao` 走 honeydo 主壳
+- **H3 栈解析优先级**：`H3_RUNTIME` env > `$LMEDIA_RUNTIME/h3` > `<默认栈>/h3`；venv 固定在栈根 `venv/`（lmedia 自带驱动脚本 `python/h3_encode.py`+`h3_generate.py`，run-python 单行 JSON 协议）
+- **H3 GPU 串行锁**：`~/.lmedia/h3.lock`（`H3_LOCK` env 可覆盖）——wx 原子创建 + 持锁写 pid/lock.start、释放追加 lock.end（观测判据）；死进程遗留锁自动回收
 - **栈目录解析优先级**：`LMEDIA_RUNTIME` env > `~/.lmedia/runtime` 软链 > 默认 `~/ml/lb-local-gen`
 - 栈目录内含：`.venv`（mflux Q8 遗留）+ `.venv-train`（diffusers bf16 推理/训练，主力）+ `.venv-video`（mmh3turbo，MiniMax-H3 MLX 引擎）
 - 模型缓存在系统级 `~/.cache/huggingface`（Qwen-Image-2512 / Qwen-Image-Edit-2511，~108GB。**默认可删但别直接 rm**——先 `lmedia image disable` 再删，见下方「图像能力开关」；2509 旧缓存确认不用后可手动删；另有 mmh3turbo-bundles ~33GB）
@@ -212,6 +284,12 @@ lmedia image edit "保持参考图中的角色外观完全一致（{完整锚点
 
 | 症状 | 原因与解法 |
 |------|-----------|
+| `image gen/edit` 报「H3 栈未就绪」 | venv/权重/出厂资产缺一项以上：先 `lmedia image setup`（建 venv）；权重 126GB 自行就位（transformer_diffusers ×12 + text_encoder ×14 分片）；布局漂移用 `H3_RUNTIME` 指认栈根（新布局 weights/ 或 legacy 同层均可）；复核 `lmedia doctor` |
+| H3 出图角色不像 / 画风漂 | 出版必须双参考 edit（`--style picturebook --char pipi`）——纯 t2i 双轴零和只配草稿；锚页/角色卡被删 → `image style/char verify` 看漂移，出厂资产随包缺失请重装 |
+| `image style/char` 命令报「清单损坏」 | 用户库 `index.json` 被外部改坏（写入是原子写）→ 手工修复或移走该文件（**绝不自动重建**）；路径见 `H3_STYLES_LIB`/`H3_CHARS_LIB` |
+| `image style remove <出厂key>` 报 builtin | 出厂预设（picturebook/pipi）不可删；要覆盖就 add 同 key 用户库条目（解析优先级：用户库 > 出厂） |
+| H3 batch 某条失败整体 exit 1 | 条目级失败不中断：看 `report.json` 该条 `reason`；修复后可只重跑失败条目（新清单）；mock 联调时 `scene` 以 `@fail` 开头是故意注入失败的测试 seam |
+| H3 gen 卡在等锁 | 前一个 GPU 任务未结束：`~/.lmedia/h3.lock` 有持锁 pid（`H3_LOCK` 可覆盖）；持锁进程已死会自动回收，活进程持锁等 30min 超时 |
 | 下载报 CAS Client Error / xet 错 | Clash TUN 与 xet 不兼容：`HF_HUB_DISABLE_XET=1`；SSL EOF 偶发 → 换 hf-mirror.com 手动下载 |
 | hf CLI 直连报 "Distant resource..." 且不想走 proxy | hf_hub 1.28 的 curl_cffi 传输层吃 macOS 系统代理，`unset` 不够：`export no_proxy='*' NO_PROXY='*'` + `HF_ENDPOINT=https://hf-mirror.com`（见 scripts/dl-*.sh） |
 | 进程 0% CPU 卡死 | HF etag 检查挂代理 → `HF_HUB_OFFLINE=1`（CLI 已内置） |
