@@ -49,7 +49,10 @@ export function parseH3BatchManifest(text: string): BatchManifestItem[] {
       throw new InvalidArgsError(`${tag} out 需为非空路径字符串`);
     }
     if (it.style !== undefined) validateKey(String(it.style), `${tag} style key`);
-    if (it.char !== undefined) validateKey(String(it.char), `${tag} char key`);
+    if (it.char !== undefined) {
+      // 多角色：逗号分隔（如 "pipi,mama"），逐段校验
+      for (const k of String(it.char).split(',')) validateKey(k.trim(), `${tag} char key`);
+    }
     if (it.seed !== undefined && (!Number.isInteger(Number(it.seed)))) {
       throw new InvalidArgsError(`${tag} seed 需为整数: ${it.seed}`);
     }

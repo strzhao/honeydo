@@ -27,25 +27,53 @@ export const FALLBACK_STYLE_SENTENCE = '严格参照 Picture 2 图像的画风�
 export interface ComposeInput {
   scene: string;
   style?: ResolvedStyle | null;
+  /** 多角色（按传入顺序 = Picture 1..N）；单角色也传数组 */
+  chars?: ResolvedChar[];
+  /** 兼容旧签名（单角色）；与 chars 同时给出时以 chars 为准 */
   char?: ResolvedChar | null;
 }
 
 export interface ComposeOutput {
   prompt: string;
-  /** 参考图绝对路径，顺序 = Picture 1（角色）、Picture 2（风格）；t2i 为空数组 */
+  /** 参考图绝对路径，顺序 = Picture 1..N（角色）、Picture N+1（风格）；t2i 为空数组 */
   images: string[];
   negatives: string;
 }
 
 export function composePrompt(input: ComposeInput): ComposeOutput {
+  const chars = input.chars ?? (input.char ? [input.char] : []);
   const template = input.style?.template ?? DEFAULT_TEMPLATE;
   const negatives = input.style?.negatives ?? DEFAULT_NEGATIVES;
-  const charIdentity = input.char?.identity || FALLBACK_CHAR_IDENTITY;
   const styleSentence = input.style?.styleSentence || FALLBACK_STYLE_SENTENCE;
+  const images: string[] = [];
+  for (const c of chars) images.push(c.ref); // Picture 1..N = 角色锚
+  if (input.style) images.push(input.style.anchor); // Picture N+1 = 风格锚
+
+  // 多角色（N≥2）：程序化组装——角色行按序生成并重编号引用，风格行移到 Picture N+1。
+  // 模板槽位 {char_identity} 是单角色语义，N≥2 时不再走槽位替换（style.json 的 negatives 仍然生效）。
+  if (chars.length >= 2) {
+    const lines: string[] = [];
+    chars.forEach((c, i) => {
+      const pic = i + 1;
+      const identity = (c.identity || FALLBACK_CHAR_IDENTITY).replaceAll('Picture 1', `Picture ${pic}`);
+      lines.push(`Picture ${pic} 是角色参考：${identity}，不要改变比例，不要简化特征。`);
+    });
+    if (input.style) {
+      const sentence = styleSentence.replaceAll('Picture 2', `Picture ${stylePicN(chars.length)}`);
+      lines.push(`Picture ${stylePicN(chars.length)} 是画风参考：${sentence}，画风自由适配到新构图。`);
+    }
+    lines.push(input.scene);
+    const base = lines.join('\n');
+    const prompt = base.includes(negatives) ? base : `${base}\n${negatives}`;
+    return { prompt, images, negatives };
+  }
+
+  // 单角色 / 无角色：原模板流（C1c 产线验证字节形态，style.json template 可覆写）
+  const charIdentity = chars[0]?.identity || FALLBACK_CHAR_IDENTITY;
 
   // 省略轴 → 整行丢弃（该行引用了缺失轴的占位符）
   const lines = template.split('\n').filter((line) => {
-    if (!input.char && line.includes('{char_identity}')) return false;
+    if (chars.length === 0 && line.includes('{char_identity}')) return false;
     if (!input.style && line.includes('{style_sentence}')) return false;
     return true;
   });
@@ -58,11 +86,11 @@ export function composePrompt(input: ComposeInput): ComposeOutput {
 
   // negatives 合并进 prompt（自定义模板已含则不重复追加）
   const prompt = filled.includes(negatives) ? filled : `${filled}\n${negatives}`;
-
-  const images: string[] = [];
-  if (input.char) images.push(input.char.ref); // Picture 1 = 角色锚
-  if (input.style) images.push(input.style.anchor); // Picture 2 = 风格锚
   return { prompt, images, negatives };
+}
+
+function stylePicN(charCount: number): number {
+  return charCount + 1;
 }
 
 /** quality 档：draft 2048x1152 直出 / publish 5472x3072 生成后 LANCZOS 缩回 2736x1536 */

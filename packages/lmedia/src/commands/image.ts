@@ -46,6 +46,7 @@ import {
   type H3AssetKind,
 } from '../lib/h3-assets.js';
 import { composePrompt, parseQuality, QUALITIES, type H3Quality } from '../lib/h3-prompt.js';
+import type { ResolvedChar } from '../lib/h3-assets.js';
 import { parseH3BatchManifest, readManifestText, type BatchManifestItem } from '../lib/h3-batch.js';
 import {
   h3SetupTarget,
@@ -214,17 +215,23 @@ function buildH3Jobs(reqs: H3JobRequest[]): {
     if (r.styleKey && !style) {
       throw new H3ArgsError(`未知风格 key: ${r.styleKey}（lmedia image style list 查看可用）`);
     }
-    const char = r.charKey ? resolveChar(r.charKey) : null;
-    if (r.charKey && !char) {
-      throw new H3ArgsError(`未知角色 key: ${r.charKey}（lmedia image char list 查看可用）`);
+    // 多角色：charKey 逗号分隔（如 "pipi,mama"）→ Picture 1..N 按序注入
+    const charKeys = (r.charKey ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+    const chars: ResolvedChar[] = [];
+    for (const key of charKeys) {
+      const c = resolveChar(key);
+      if (!c) {
+        throw new H3ArgsError(`未知角色 key: ${key}（lmedia image char list 查看可用）`);
+      }
+      chars.push(c);
     }
-    const composed = composePrompt({ scene: r.scene, style, char });
+    const composed = composePrompt({ scene: r.scene, style, chars });
     results.push({
       scene: r.scene,
       out: r.out,
       ok: false,
       styleKey: style?.key ?? '',
-      charKey: char?.key ?? '',
+      charKey: chars.map((c) => c.key).join(','),
     });
     // edit 语义（withRefs）才带参考图：Picture 1 角色锚 / Picture 2 风格锚；t2i 纯文本（双轴零和，草稿专用）
     live.push({ index, prompt: composed.prompt, images: r.withRefs ? composed.images : [], size: genSizeFor(r) });
@@ -487,7 +494,7 @@ function registerGen(image: Command): void {
     .option('-o, --out <path>', '输出路径（h3）', `lmedia-h3-${Date.now()}.png`)
     .option('--quality <q>', 'h3 质量档：draft（2048x1152 直出）| publish（5472x3072 生成后缩回 2736x1536）', 'draft')
     .option('--style <key>', 'h3: 风格资产 key（picturebook）；local: 风格 LoRA 名')
-    .option('--char <key>', 'h3: 角色资产 key（pipi）；local: 角色 LoRA 名')
+    .option('--char <keys>', 'h3: 角色 key 逗号分隔多角色按序注入（如 pipi,mama → Picture 1/2）；local: 角色 LoRA 名')
     .option('--json', 'h3: stdout 输出单行 JSON 元数据（冻结字段）')
     .option('--seed <n>', '随机种子', '42')
     .option('--style-weight <n>', 'local: 风格 LoRA 权重（覆盖注册表默认）')
@@ -560,7 +567,7 @@ function registerEdit(image: Command): void {
     )
     .option('-o, --out <path>', '输出路径', `lmedia-edit-${Date.now()}.png`)
     .option('--style <key>', '风格 key（image style list 查看；省略则不注入风格轴）')
-    .option('--char <key>', '角色 key（image char list 查看；省略则不注入角色轴）')
+    .option('--char <keys>', '角色 key 逗号分隔多角色按序注入（image char list 查看；省略则不注入角色轴）')
     .option('--quality <q>', '质量档：draft（2048x1152 直出）| publish（5472x3072 生成后 LANCZOS 缩回 2736x1536）', 'draft')
     .option('--seed <n>', '随机种子', '42')
     .option('--json', 'stdout 输出单行 JSON 元数据（冻结字段）')
@@ -602,7 +609,7 @@ function registerBatch(image: Command): void {
     .description(
       '清单驱动批量出图（H3）：encode/generate 各一次模型加载 + GPU 串行锁；逐条审计 report.json（条目级失败不中断）',
     )
-    .requiredOption('-m, --manifest <file>', '批清单 JSON 路径（- 读 stdin）：[{"scene","out","style"?,"char"?,"seed"?,"size"?}]')
+    .requiredOption('-m, --manifest <file>', '批清单 JSON 路径（- 读 stdin）：[{"scene","out","style"?,"char"?(逗号分隔多角色),"seed"?,"size"?}]')
     .option('-o, --out <dir>', '输出目录（缺省 = 清单所在目录；report.json 落这里，条目相对 out 以此为基准）')
     .option('--quality <q>', '质量档（draft|publish；条目 size 可逐条覆盖尺寸）', 'draft')
     .option('--json', 'stdout 输出单行 JSON {report, dir, ok_count, failed_count, elapsed_s}')

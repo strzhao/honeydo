@@ -115,3 +115,36 @@ describe('quality / size 解析', () => {
     expect(() => parseSize('100')).toThrow(/WxH/);
   });
 });
+
+describe('composePrompt 多角色（N≥2 程序化组装）', () => {
+  const charA = { key: 'pipi', source: 'builtin' as const, ref: '/refs/pipi.png', identity: '小蜜蜂男孩皮皮，黄大头黑短发带触角' };
+  const charB = { key: 'mama', source: 'builtin' as const, ref: '/refs/mama.png', identity: '蜂妈，粉色碎花裙白围裙的成年蜜蜂' };
+
+  it('双角色无风格：Picture 1/2 角色行按序注入、无风格行', () => {
+    const r = composePrompt({ scene: '厨房递蜂蜜', style: null, chars: [charA, charB] });
+    expect(r.images).toEqual(['/refs/pipi.png', '/refs/mama.png']);
+    expect(r.prompt).toContain('Picture 1 是角色参考：小蜜蜂男孩皮皮');
+    expect(r.prompt).toContain('Picture 2 是角色参考：蜂妈');
+    expect(r.prompt).not.toContain('是画风参考');
+  });
+
+  it('双角色 + 风格：负向表合并，身份句里 Picture 1 引用随序号重编号', () => {
+    const style = { key: 'picturebook', source: 'builtin' as const, anchor: '/anchor.png', styleSentence: '保持 Picture 2 图像的水彩画风', negatives: '无文字' };
+    const r = composePrompt({ scene: '花园追泡泡', style, chars: [charA, charB] });
+    expect(r.prompt).toContain('Picture 3 是画风参考：保持 Picture 3 图像的水彩画风');
+    expect(r.prompt).toContain('无文字');
+    expect(r.images).toEqual(['/refs/pipi.png', '/refs/mama.png', '/anchor.png']);
+  });
+
+  it('单角色走原模板流（行为不变）', () => {
+    const r = composePrompt({ scene: 's', style: null, chars: [charA] });
+    expect(r.prompt).toContain('Picture 1 是角色参考：小蜜蜂男孩皮皮，黄大头黑短发带触角，不要改变比例，不要简化特征。');
+    expect(r.prompt).not.toContain('是画风参考');
+  });
+
+  it('多角色身份句缺省时兜底句的 Picture 1 引用重编号', () => {
+    const c = { key: 'mama', source: 'user' as const, ref: '/refs/m.png' };
+    const r = composePrompt({ scene: 's', style: null, chars: [charA, c] });
+    expect(r.prompt).toContain('Picture 2 是角色参考：参考 Picture 2 图像中的角色');
+  });
+});
