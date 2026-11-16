@@ -83,6 +83,23 @@ describe('用户库生命周期（style 轴）', () => {
   });
 });
 
+describe('用户库 style 模板以文件内容参与组装（回归）', () => {
+  it('resolveStyle().template = txt 内容（含 {scene} 槽位），而非文件路径', () => {
+    // 回归背景：曾把 template.txt 的「路径字符串」当模板下发——路径无槽位，
+    // composePrompt 槽位替换全空转，scene 与分工句被整体丢掉（实测 prompt 只剩路径+负向表）
+    const tpl = path.join(dir, 'tpl.txt');
+    fs.writeFileSync(tpl, 'Picture 1 是角色参考：{char_identity}。\nPicture 2 是画风参考：{style_sentence}。\n{scene}\n{negatives}\n');
+    addStyle(stylesRoot, { key: 'tpl-style', anchor: fixtureA(), template: tpl });
+    const resolved = resolveStyle('tpl-style', stylesRoot);
+    expect(resolved?.template).toContain('{scene}');
+    expect(resolved?.template).toContain('{char_identity}');
+    expect(resolved?.template).not.toContain('tpl.txt');
+    expect(resolved?.template!.startsWith('Picture 1')).toBe(true);
+    // 清场：sha256 幂等会让同内容 fixture 影响后续用例的注册
+    removeEntry(stylesRoot, 'style', 'tpl-style');
+  });
+});
+
 describe('用户库生命周期（char 轴，与 style 同语义）', () => {
   it('add/list/remove 全链路', () => {
     addChar(charsRoot, { key: 'my-char', ref: fixtureA(), identity: path.join(dir, 'a.png') });

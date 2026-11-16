@@ -349,7 +349,9 @@ function userStyleToResolved(item: H3AssetItem): ResolvedStyle {
     anchor: item.files.anchor ?? item.path,
     styleSentence: undefined,
     negatives: undefined,
-    template: item.files.template,
+    // 模板 txt 必须以「文件内容」参与组装——若传路径字符串，路径无 {scene}/{char_identity} 槽位，
+    // composePrompt 的槽位替换全部空转，场景与分工句会被整体丢掉（只剩路径+负向表，2026-11-14 实测翻车）
+    template: item.files.template ? fs.readFileSync(item.files.template, 'utf-8') : undefined,
   };
 }
 
