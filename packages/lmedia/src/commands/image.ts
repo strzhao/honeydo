@@ -259,7 +259,7 @@ async function runH3Jobs(reqs: H3JobRequest[]): Promise<H3RunOutput> {
       const enc = await runPython(
         py,
         path.join(pyDir, 'h3_encode.py'),
-        { runtime: rt.root, work, mock, prompt_refs: live.map((l) => ({ prompt: l.prompt, images: l.images })) },
+        { runtime: rt.root, work, mock, prompt_refs: live.map((l) => ({ prompt: l.prompt, images: l.images, seed: reqs[l.index].seed })) },
         { acceptFailure: true },
       );
       const encItems = (enc.items ?? []) as { index: number; failed?: boolean; error?: string }[];

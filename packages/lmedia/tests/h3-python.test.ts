@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 const PKG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ENCODE = path.join(PKG, 'python', 'h3_encode.py');
 const GENERATE = path.join(PKG, 'python', 'h3_generate.py');
+const STATE_CONTRACT = path.join(PKG, 'tests', 'fixtures', 'h3_state_contract.py');
 
 let dir = '';
 let work = '';
@@ -32,6 +33,20 @@ function lastLineJson(stdout: string): Record<string, unknown> {
   const lines = stdout.trim().split('\n').filter(Boolean);
   return JSON.parse(lines[lines.length - 1]);
 }
+
+describe('h3 两阶段真实函数参考图契约（轻量假组件）', () => {
+  it('refs/reference_latents 同步落盘，generate 全程选择 image_conditioned', () => {
+    const r = spawnSync('python3', [STATE_CONTRACT, ENCODE, GENERATE, dir], { encoding: 'utf-8' });
+    expect(r.status, r.stderr).toBe(0);
+    const result = lastLineJson(r.stdout);
+    expect(result.ok).toBe(true);
+    expect(result.calls).toEqual([
+      'before_encode:image_conditioned',
+      'denoise:image_conditioned',
+      'decode:image_conditioned',
+    ]);
+  });
+});
 
 describe('h3_encode.py（mock）', () => {
   it('协议：stdout 末行单行 JSON；stderr 带 [h3:encode] 标记；.pt/.encode.json 落盘', () => {

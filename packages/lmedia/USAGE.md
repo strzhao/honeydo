@@ -146,6 +146,8 @@ lmedia image batch -m pages.json -o out/                     # 默认 stdout 一
 2. 分工句式自动组装：`Picture 1 是角色参考：<身份锁定句>…` + `Picture 2 是画风参考：<画风句>…` + 场景 + 负向表（`无文字，无水印，无柔焦光晕，无圆形光斑。`），模板可被 style.json 覆写
 3. 弱引用 + 分工句是关键：参考图只给图不给文字锚会漂；省略某轴则不注入对应分工句
 4. GPU 串行锁：gen/edit/batch 全部走 `~/.lmedia/h3.lock`（`H3_LOCK` 可覆盖）；batch encode/generate 各只加载一次模型
+5. **改 prompt / 参考图配方前先读官方 H3 Image 指南**：<https://github.com/MiniMax-AI/MiniMax-H3-Image/tree/main/skills/h3-image-prompt-writing>（本地不做线上 prompt expansion，需完整英文成品描述；属性 donor 写清转移/保留边界。H3 视频 Full-Reference 指南不是同一配方，勿混用）
+6. **参考图链路日志自检**：带角色/风格参考时，encode 与 generate 都必须显示 `edit=True`，generate 的 `before_encode` 不得为 `skipped`；否则是管线异常，不是审美/锚图问题，禁止在此状态下做风格 A/B 结论
 
 ### 资产库（style / char 双轴 SSOT）
 

@@ -181,7 +181,10 @@ def real_generate_one(item: dict, work: Path, pipe) -> dict:
     width, height = gen_size
 
     payload = torch.load(work / f"{i}.pt", weights_only=False)
-    images = [Image.open(p).convert("RGB") for p in payload.get("refs", [])]
+    refs = list(payload.get("refs") or [])
+    if bool(refs) != ("reference_latents" in payload):
+        raise RuntimeError("encode 产物参考图状态不一致：refs 与 reference_latents 必须同时存在")
+    images = [Image.open(p).convert("RGB") for p in refs]
     conditioned = bool(images)
     log(f"[h3:denoise] {now()} item {i} generate {width}x{height} edit={conditioned} ({quality})")
 

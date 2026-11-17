@@ -4,8 +4,8 @@
 协议（对齐 src/lib/run-python.ts）：argv[1] = 单行 JSON payload；stdout 末行 = 单行 compact JSON 结果；
 进度/阶段标记一律 stderr（[h3:encode] 前缀）。退出码 0 成功 / 1 运行错误。
 
-payload: {runtime, work, mock?, prompt_refs: [{prompt, images: [路径]}]}
-产出: 逐条 work/<i>.pt（prompt_embeds + text_token_tags + [reference_latents]）+ work/<i>.encode.json
+payload: {runtime, work, mock?, prompt_refs: [{prompt, images: [路径], seed?}]}
+产出: 逐条 work/<i>.pt（prompt + refs + seed + prompt_embeds + text_token_tags + [reference_latents]）+ work/<i>.encode.json
 
 mock 模式（payload mock:true，LMEDIA_IMAGE_MOCK=1 测试 seam）：跳过模型加载，仅用标准库落盘
 （.pt 为 JSON 描述文件，结构与真实产物 meta 对齐），全流程秒级。
@@ -149,8 +149,11 @@ def real_encode_one(i: int, item: dict, work: Path, pipe) -> dict:
         state = run_block(pipe, state, "vae_encoder", conditioned=True)
 
     embeds = state.get("prompt_embeds").cpu()
+    # refs 必须进入张量载荷：阶段二靠它恢复参考图并选择 image_conditioned；
+    # 只写 encode meta 会让阶段二静默退回 text2image（此前所有风格 A/B 因此失效）。
     payload = {
         "prompt": prompt,
+        "refs": list(item.get("images") or []),
         "seed": seed,
         "prompt_embeds": embeds,
         "text_token_tags": state.get("text_token_tags").cpu(),
